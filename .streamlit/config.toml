@@ -1,0 +1,15 @@
+# Bao Solutions inspired light theme — matches the desktop GUI
+[theme]
+base = "light"
+primaryColor = "#FF5632"
+backgroundColor = "#FCFBF9"
+secondaryBackgroundColor = "#F0E7DF"
+textColor = "#35375B"
+font = "sans serif"
+
+[server]
+maxUploadSize = 500       # MB  — TR40 .dat files can total ~200 MB per night
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
