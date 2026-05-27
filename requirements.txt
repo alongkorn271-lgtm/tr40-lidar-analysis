@@ -7,6 +7,11 @@ numpy>=1.24
 pandas>=2.0
 openpyxl>=3.1          # Excel I/O backend used by pandas
 matplotlib>=3.7
-customtkinter>=5.2     # modern Tk theme used by main_v2.py (primary GUI)
+
+# Web front-end (Streamlit Cloud / local)
+streamlit>=1.36
+
+# Desktop GUI (main_v2.py) - optional for Streamlit-only deployments
+customtkinter>=5.2
 
 # tkinter ships with the Python standard library — no pip install needed.

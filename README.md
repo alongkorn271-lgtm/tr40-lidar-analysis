@@ -47,11 +47,29 @@ pip install -r requirements.txt
 
 ## Running the GUI
 
+**Desktop (CustomTkinter, full-featured):**
 ```bash
 python main_v2.py
 ```
+The primary desktop GUI; legacy `main.py` (plain Tkinter) is kept as fallback.
 
-The primary GUI is `main_v2.py` (CustomTkinter, light "Bao" theme). The legacy `main.py` (plain Tkinter) is kept as a fallback.
+**Web (Streamlit, deployable):**
+```bash
+streamlit run streamlit_app.py
+```
+Opens at `http://localhost:8501`. Each step is its own page in the sidebar.
+Output of Step N is held in `st.session_state` so Step N+1 picks it up
+automatically — no re-uploading between steps.
+
+### Deploy to Streamlit Community Cloud
+1. Push this repository to GitHub.
+2. Sign in at <https://streamlit.io/cloud> with the same GitHub account.
+3. **New app** → pick the repo → set **Main file = `streamlit_app.py`**.
+4. Streamlit Cloud auto-installs from `requirements.txt`. App URL appears in ~1 min.
+5. The `.streamlit/config.toml` carries the Bao colour theme.
+
+Note: Streamlit Cloud has an ephemeral filesystem — users upload inputs and
+download outputs (no persistent disk).
 
 ---
 
@@ -68,6 +86,15 @@ The primary GUI is `main_v2.py` (CustomTkinter, light "Bao" theme). The legacy `
 ├── fernald_engine.py       ← Step 5 backend  (Fernald / Klett inversion)
 ├── overlap.py              ← O(R) — Rice-CDF analytical + file load
 ├── afterpulse.py           ← A(R) — .dat / CSV / Excel loaders
+│
+├── streamlit_app.py        ← web entry (Streamlit Home page)
+├── pages/                  ← Streamlit auto-discovered step pages 1–5
+│   ├── 1_📁_MPL_rmin-rmax.py
+│   ├── 2_📈_NRB_Profile.py
+│   ├── 3_📊_ALT_Detection.py
+│   ├── 4_🌈_RTI_Visualizer.py
+│   └── 5_🔬_Fernald.py
+├── .streamlit/config.toml  ← Bao colour theme for Streamlit
 │
 ├── MPL data/               ← sample Mini-MPL CSV (input for Step 1)
 ├── afterpulse.dat          ← detector afterpulse calibration file
