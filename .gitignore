@@ -1,0 +1,49 @@
+# ─── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+build/
+dist/
+
+# ─── Virtual environments ─────────────────────────────────────────────────
+venv/
+env/
+.venv/
+.env
+
+# ─── IDE / Editor ─────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+
+# ─── OS junk ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Claude / agent session state ─────────────────────────────────────────
+.claude/
+
+# ─── Analysis outputs (regenerated from inputs) ───────────────────────────
+NRB-*.xlsx
+ALT_NRB-*.xlsx
+Fernald-*.xlsx
+rmin-rmax-*.xlsx
+*_output.xlsx
+*_ALT_output.xlsx
+
+# ─── Temp / scratch (anything prefixed with _) ────────────────────────────
+_*.py
+_*.xlsx
+_*.png
+_*.csv
+
+# ─── Large vendor docs / private data ─────────────────────────────────────
+MPL data/*.pdf
+
+# ─── Logs ─────────────────────────────────────────────────────────────────
+*.log
