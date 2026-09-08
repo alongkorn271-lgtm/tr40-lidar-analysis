@@ -6,6 +6,18 @@ Research-grade processing for the **TR40 elastic Mie LiDAR (532 nm)** at NARIT, 
 
 ---
 
+## Screenshots
+
+**Step 5 — Range-Time Intensity: Prototype TR40 vs Mini-MPL** (time-height backscatter, auto time-aligned)
+
+![Step 5 RTI comparison](picture/screenshot_step5_rti.png)
+
+**Step 2 — Depolarization & analog↔photon glue overlay** (per-profile glue with toggle-rate window)
+
+![Step 2 glue overlay](picture/screenshot_step2_glue.png)
+
+---
+
 ## Pipeline at a glance
 
 | Step | Page | Input | Output |
