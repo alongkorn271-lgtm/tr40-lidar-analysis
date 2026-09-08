@@ -33,7 +33,9 @@ class OverlapHardware:
         Telescope:  Celestron EdgeHD 800 (D=203 mm, f=2032 mm, F/10)
         Laser:      Quantel VIRON @ 532 nm, D4sigma=3.8 mm, divergence 1.5 mrad
         Detector:   Licel PM-HV / R9880U, 8 mm cathode
-        Geometry:   Biaxial, d_perp = 148.12 mm
+        Geometry:   Biaxial, d_perp = 156.0 mm  (measured from the 2026 CAD
+                    "LiDAR_with_polarized-update" — the polarizer optics moved
+                    the laser mount; was 148.12 mm before that revision)
     """
     # Telescope
     f_mm: float = 2032.0
@@ -46,7 +48,7 @@ class OverlapHardware:
     # Receiver
     field_stop_diameter_mm: float = 8.0
     # Biaxial geometry
-    d_perp_mm: float = 148.12
+    d_perp_mm: float = 156.0
     laser_tilt_rad: float = 0.0
 
     @property

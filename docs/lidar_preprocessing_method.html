@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TR40 LiDAR Pre-processing — Method & Theory</title>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(','\\)']], displayMath: [['$$','$$'], ['\\[','\\]']], tags: 'none' },
+  svg: { fontCache: 'global' },
+  options: { renderActions: { addMenu: [] } }
+};
+</script>
+<script src="./tex-svg.js" id="MathJax-script" async></script>
+<style>
+  :root{
+    --ink:#1a1c20; --muted:#5b6270; --line:#d9dde3; --soft:#f4f6f9;
+    --accent:#0b5cad; --accent2:#0a7d5a; --warn:#a15c00; --code:#0f1a2b;
+    --codebg:#f6f8fa; --badge:#0b5cad;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; color:var(--ink);
+    font:16px/1.62 "Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;
+    background:#eef1f5;
+  }
+  .wrap{max-width:900px; margin:0 auto; background:#fff; padding:56px 60px 90px;
+    box-shadow:0 1px 40px rgba(0,0,0,.06);}
+  h1{font-size:29px; line-height:1.2; margin:0 0 6px; letter-spacing:-.01em}
+  .sub{color:var(--muted); font-size:15px; margin:0 0 4px}
+  .meta{color:var(--muted); font-size:13px; margin:2px 0 0}
+  h2{font-size:22px; margin:46px 0 6px; padding-top:6px; letter-spacing:-.01em}
+  h3{font-size:17px; margin:26px 0 6px; color:#222}
+  .step h2{border-top:2px solid var(--line); padding-top:22px}
+  .stepbadge{display:inline-block; min-width:26px; text-align:center;
+    background:var(--badge); color:#fff; font-size:14px; font-weight:700;
+    border-radius:6px; padding:1px 8px; margin-right:10px; vertical-align:2px}
+  p{margin:10px 0}
+  .lead{color:var(--muted)}
+  .phys{background:var(--soft); border-left:3px solid var(--accent);
+    padding:10px 16px; border-radius:0 8px 8px 0; margin:14px 0}
+  .why{background:#fbf7ef; border-left:3px solid var(--warn);
+    padding:10px 16px; border-radius:0 8px 8px 0; margin:14px 0}
+  .phys b, .why b{letter-spacing:.01em}
+  code, pre{font-family:"Cascadia Code",Consolas,"SFMono-Regular",Menlo,monospace}
+  code{background:var(--codebg); padding:1px 5px; border-radius:4px; font-size:13.5px;
+    color:var(--code)}
+  pre{background:var(--codebg); border:1px solid var(--line); border-radius:8px;
+    padding:12px 14px; overflow-x:auto; font-size:12.8px; line-height:1.5; margin:12px 0}
+  pre code{background:none; padding:0}
+  .fn{color:var(--muted); font-size:12.5px; margin:4px 0 0; font-style:italic}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:13.5px}
+  th,td{border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top}
+  th{background:var(--soft); font-weight:600}
+  td code{font-size:12.5px}
+  ol.order{counter-reset:step; list-style:none; padding-left:0}
+  ol.order li{position:relative; padding:6px 0 6px 40px; border-bottom:1px dashed var(--line)}
+  ol.order li:before{counter-increment:step; content:counter(step);
+    position:absolute; left:0; top:6px; width:26px; height:26px; line-height:26px;
+    text-align:center; background:var(--accent); color:#fff; border-radius:50%;
+    font-size:13px; font-weight:700}
+  .tag{color:var(--muted)}
+  .eqn{overflow-x:auto}
+  .callout{border:1px solid var(--line); border-radius:8px; padding:2px 16px; margin:16px 0;
+    background:#fafbfc}
+  .toc{background:var(--soft); border:1px solid var(--line); border-radius:10px;
+    padding:14px 20px 16px; margin:24px 0 6px}
+  .toc h4{margin:2px 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted)}
+  .toc ol{margin:0; padding-left:20px; columns:2; column-gap:34px; font-size:14px}
+  .toc a{color:var(--accent); text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .foot{color:var(--muted); font-size:12.5px; border-top:1px solid var(--line);
+    margin-top:40px; padding-top:14px}
+  .pill{display:inline-block; font-size:11px; font-weight:700; letter-spacing:.04em;
+    text-transform:uppercase; padding:2px 8px; border-radius:20px; margin-left:8px;
+    vertical-align:2px}
+  .pill.opt{background:#eef3fb; color:var(--accent)}
+  .pill.new{background:#eafaf3; color:var(--accent2)}
+  hr.soft{border:0; border-top:1px solid var(--line); margin:34px 0}
+  figure{margin:20px 0; text-align:center}
+  figure svg{max-width:100%; height:auto}
+  figcaption{color:var(--muted); font-size:12.5px; margin-top:8px; text-align:center;
+    line-height:1.45}
+  .parthead{background:linear-gradient(180deg,#0b5cad,#0a4a8c); color:#fff;
+    border-radius:10px; padding:16px 22px; margin:40px 0 6px}
+  .parthead h2{border:0; margin:0; color:#fff; padding:0}
+  .parthead p{margin:6px 0 0; color:#dbe8f6; font-size:14px}
+  svg text{font-family:"Segoe UI",system-ui,Arial,sans-serif}
+  @media (max-width:680px){
+    .wrap{padding:26px 18px 60px} .toc ol{columns:1}
+    h1{font-size:23px}
+  }
+  @media print{
+    body{background:#fff}
+    .wrap{box-shadow:none; max-width:none; margin:0; padding:0 8mm}
+    a{color:var(--ink); text-decoration:none}
+    .toc{break-inside:avoid}
+    .step{break-before:page}
+    h2,h3{break-after:avoid}
+    pre,table,.phys,.why,.eqn,.callout{break-inside:avoid}
+    .noprint{display:none}
+    @page{size:A4; margin:16mm 14mm}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TR40 LiDAR Data Pre-processing</h1>
+<p class="sub">Full-pipeline method and the theory behind each step &mdash; raw <code>.dat</code> to Normalized
+Relative Backscatter (NRB), depolarization, and the Klett&ndash;Fernald aerosol retrieval</p>
+<p class="meta">NARIT &mdash; Princess Sirindhorn AstroPark, Chiang Mai &nbsp;&middot;&nbsp; 532&nbsp;nm elastic (Mie) LiDAR &nbsp;&middot;&nbsp; biaxial Celestron EdgeHD + Licel TR40 (analog&nbsp;mV + photon&nbsp;MHz), 2 polarization channels (&#8741;/&#8869;)</p>
+
+<div class="callout">
+<p><b>What this document covers.</b> The <b>core signal pre-processing chain</b>: how one raw
+<code>.dat</code> acquisition becomes a calibrated backscatter profile, and the depolarization
+ratio built from the &#8741;/&#8869; channels. Each step below states the <i>physics problem</i>, the
+<i>equation(s)</i> as implemented in the code, and <i>why it must run in that order</i>.</p>
+<p class="tag" style="margin-bottom:8px"><b>Part B</b> then documents the on-demand retrieval that runs <i>after</i> this chain &mdash; the
+Rayleigh molecular model, the analytical overlap function \(O(R)\), the Klett&ndash;Fernald inversion
+(aerosol backscatter/extinction/AOD), and PBL/ALT layer detection. The MPL and AERONET readers are
+validation inputs and are only pointed to where relevant.</p>
+</div>
+
+<div class="toc noprint">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#overview">Processing order &amp; the NRB equation</a></li>
+    <li><a href="#s1">Step&nbsp;1 &mdash; Raw ingest &amp; range mapping</a></li>
+    <li><a href="#s2">Step&nbsp;2 &mdash; Dead-time correction</a></li>
+    <li><a href="#s3">Step&nbsp;3 &mdash; Background estimation</a></li>
+    <li><a href="#s4">Step&nbsp;4 &mdash; Toggle-rate window</a></li>
+    <li><a href="#s5">Step&nbsp;5 &mdash; Analog&#8596;photon glue</a></li>
+    <li><a href="#s6">Step&nbsp;6 &mdash; Background subtraction</a></li>
+    <li><a href="#s7">Step&nbsp;7 &mdash; Afterpulse correction</a></li>
+    <li><a href="#s8">Step&nbsp;8 &mdash; Overlap correction</a></li>
+    <li><a href="#s9">Step&nbsp;9 &mdash; Range&sup2; &amp; energy &rarr; NRB</a></li>
+    <li><a href="#s10">Step&nbsp;10 &mdash; Max normalization</a></li>
+    <li><a href="#s11">Step&nbsp;11 &mdash; Signal-to-noise (SNR)</a></li>
+    <li><a href="#s12">Step&nbsp;12 &mdash; SNR gating</a></li>
+    <li><a href="#depol">Depolarization ratio (VDR)</a></li>
+    <li><a href="#partb"><b>Part B</b> &mdash; on-demand retrieval</a></li>
+    <li><a href="#rayleigh">B1 &mdash; Rayleigh molecular model</a></li>
+    <li><a href="#overlap">B2 &mdash; Overlap function \(O(R)\)</a></li>
+    <li><a href="#fernald">B3 &mdash; Klett&ndash;Fernald inversion</a></li>
+    <li><a href="#pbl">B4 &mdash; PBL / ALT detection</a></li>
+    <li><a href="#appendix">Appendix &mdash; dependencies, config, QC</a></li>
+  </ol>
+</div>
+
+<!-- ===================== OVERVIEW ===================== -->
+<h2 id="overview">Processing order &amp; the NRB equation</h2>
+<p>The pipeline targets one master equation (the SigmaMPL form of the lidar backscatter product),
+built up correction-by-correction inside <code>compute_nrb_reference_glue()</code> (an optional
+final \(\div\max\) gives the unit-max profile of Step&nbsp;10):</p>
+<div class="eqn">
+$$\mathrm{NRB}(R)\;=\;\frac{\big[(\text{Raw}\cdot\text{DT}) - \text{Afterpulse} - \text{BG}\big]}
+{\text{Overlap}(R)\cdot E}\;\cdot\;R^{2}\tag{0}$$
+</div>
+<p>Every term in Eq.&nbsp;(0) is a term of the general single-channel elastic-lidar equation, so each
+step below "undoes" one physical effect:</p>
+<div class="eqn">
+$$P(R)\;=\;P_0\,\frac{c\tau}{2}\,\frac{A}{R^{2}}\,O(R)\,\beta(R)\,
+\exp\!\Big[-2\!\int_0^{R}\!\alpha(R')\,dR'\Big]\tag{L}$$
+</div>
+<p class="lead"><code>DT</code> corrects detector pile-up; <code>BG</code> removes the solar/electronic pedestal;
+<code>Afterpulse</code> removes a detector ghost; dividing by <code>Overlap</code> \(O(R)\) fixes the
+biaxial near field; \(\times R^2\) undoes the \(A/R^2\) geometric fall-off; \(\div E\) normalizes by
+laser pulse energy. The molecular/aerosol backscatter \(\beta(R)\) and transmission
+\(\exp[-2\!\int\alpha]\) are recovered later by the inversion (out of scope).</p>
+
+<p>The steps run in the following <b>dependency order</b> (this is the order of the document):</p>
+<ol class="order">
+  <li><b>Raw <code>.dat</code> ingest</b> &mdash; parse the 4-column TR40 ASCII, drop pre-trigger bins, map bin&nbsp;&rarr;&nbsp;range.</li>
+  <li><b>Dead-time correction</b> of the photon channel (run first, because the background is measured on the corrected rate).</li>
+  <li><b>Background estimation</b> (pre-trigger / fixed / far-range gate).</li>
+  <li><b>Day/night toggle-rate window</b> &mdash; choose the photon-rate band used to select the glue region.</li>
+  <li><b>Analog&#8596;photon glue</b> &mdash; cross-calibrate the two detectors and blend them.</li>
+  <li><b>Background subtraction.</b></li>
+  <li><b>Afterpulse correction</b> (optional).</li>
+  <li><b>Overlap correction</b> \(O(R)\) (optional).</li>
+  <li><b>Range&sup2; + energy normalization</b> &rarr; NRB.</li>
+  <li><b>Max normalization</b> (0&ndash;1 profile).</li>
+  <li><b>SNR</b> of the photon channel.</li>
+  <li><b>SNR gating / trusted-range normalization</b> (optional).</li>
+</ol>
+<p class="fn">All of the above is implemented in <code>nrb_engine.py</code>; the per-file orchestrator is
+<code>build_single_profile()</code> and the per-day batch is <code>build_daily_profile_from_folder()</code>.
+Depolarization is in <code>depol_engine.py</code>.</p>
+
+<figure>
+<svg viewBox="0 0 720 430" role="img" aria-label="Full pipeline flow diagram">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#5b6270"/>
+    </marker>
+    <style>
+      .bx{fill:#f4f6f9;stroke:#0b5cad;stroke-width:1.4;rx:8}
+      .bt{fill:#1a1c20;font-size:12px;font-weight:600}
+      .num{fill:#0b5cad;font-size:11px;font-weight:700}
+      .wire{stroke:#5b6270;stroke-width:1.4;fill:none}
+      .grp{fill:none;stroke:#c7d2df;stroke-width:1;stroke-dasharray:4 4;rx:12}
+      .lbl{fill:#5b6270;font-size:11px;font-weight:700;letter-spacing:.06em}
+      .adv{fill:#eafaf3;stroke:#0a7d5a;stroke-width:1.4;rx:8}
+      .advt{fill:#0a3d2c;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <!-- Part A group -->
+  <rect class="grp" x="4" y="24" width="712" height="196"/>
+  <text class="lbl" x="16" y="42">PART A · CORE PRE-PROCESSING (nrb_engine.py)</text>
+
+  <!-- Row 1 -->
+  <g>
+    <rect class="bx" x="14"  y="54" width="128" height="40"/><text class="num" x="24" y="70">1</text><text class="bt" x="24" y="84">Raw .dat</text>
+    <rect class="bx" x="162" y="54" width="128" height="40"/><text class="num" x="172" y="70">2</text><text class="bt" x="172" y="84">Dead-time</text>
+    <rect class="bx" x="310" y="54" width="128" height="40"/><text class="num" x="320" y="70">3</text><text class="bt" x="320" y="84">Background</text>
+    <rect class="bx" x="458" y="54" width="128" height="40"/><text class="num" x="468" y="70">4</text><text class="bt" x="468" y="84">Toggle window</text>
+    <rect class="bx" x="606" y="54" width="100" height="40"/><text class="num" x="616" y="70">5</text><text class="bt" x="616" y="84">Glue</text>
+    <path class="wire" d="M142,74 H162" marker-end="url(#ar)"/>
+    <path class="wire" d="M290,74 H310" marker-end="url(#ar)"/>
+    <path class="wire" d="M438,74 H458" marker-end="url(#ar)"/>
+    <path class="wire" d="M586,74 H606" marker-end="url(#ar)"/>
+    <!-- serpentine down to row 2 -->
+    <path class="wire" d="M656,94 V116 H58 V138" marker-end="url(#ar)"/>
+  </g>
+
+  <!-- Row 2 -->
+  <g>
+    <rect class="bx" x="14"  y="140" width="128" height="40"/><text class="num" x="24" y="156">6</text><text class="bt" x="24" y="170">BG subtract</text>
+    <rect class="bx" x="162" y="140" width="128" height="40"/><text class="num" x="172" y="156">7</text><text class="bt" x="172" y="170">Afterpulse</text>
+    <rect class="bx" x="310" y="140" width="128" height="40"/><text class="num" x="320" y="156">8</text><text class="bt" x="320" y="170">Overlap O(R)</text>
+    <rect class="bx" x="458" y="140" width="128" height="40"/><text class="num" x="468" y="156">9</text><text class="bt" x="468" y="170">R² / Energy</text>
+    <rect class="bx" x="606" y="140" width="100" height="40" style="fill:#e7f0fb;stroke-width:2"/><text class="num" x="616" y="156">10</text><text class="bt" x="616" y="170">NRB</text>
+    <path class="wire" d="M142,160 H162" marker-end="url(#ar)"/>
+    <path class="wire" d="M290,160 H310" marker-end="url(#ar)"/>
+    <path class="wire" d="M438,160 H458" marker-end="url(#ar)"/>
+    <path class="wire" d="M586,160 H606" marker-end="url(#ar)"/>
+  </g>
+
+  <!-- SNR side note -->
+  <rect class="bx" x="310" y="192" width="276" height="22" style="fill:#fff;stroke-dasharray:3 3"/>
+  <text class="bt" x="320" y="207" style="font-weight:500;font-size:11px">11–12 · SNR &amp; SNR-gate  (branch off steps 2 + 3)</text>
+
+  <!-- NRB down to Part B -->
+  <path class="wire" d="M656,180 V236 H360 V258" marker-end="url(#ar)"/>
+
+  <!-- Part B group -->
+  <rect class="grp" x="4" y="248" width="712" height="164" style="stroke:#9bd7bf"/>
+  <text class="lbl" x="16" y="266" style="fill:#0a7d5a">PART B · ON-DEMAND RETRIEVAL</text>
+
+  <rect class="adv" x="14"  y="276" width="150" height="44"/><text class="advt" x="24" y="294">Depolarization</text><text class="advt" x="24" y="310" style="font-weight:400">δv(R) · depol_engine</text>
+  <rect class="adv" x="180" y="276" width="180" height="44"/><text class="advt" x="190" y="294">Rayleigh βm(R)</text><text class="advt" x="190" y="310" style="font-weight:400">+ Overlap O(R)</text>
+  <rect class="adv" x="376" y="276" width="196" height="44"/><text class="advt" x="386" y="294">Klett–Fernald inversion</text><text class="advt" x="386" y="310" style="font-weight:400">βaer, αaer, AOD, mass</text>
+  <rect class="adv" x="588" y="276" width="118" height="44"/><text class="advt" x="598" y="294">PBL / ALT</text><text class="advt" x="598" y="310" style="font-weight:400">layer top</text>
+
+  <path class="wire" d="M270,320 V344 H466 V344" style="stroke:#0a7d5a" marker-end="url(#ar)"/>
+  <text class="advt" x="300" y="360" style="font-weight:400;fill:#5b6270">δ → height-resolved lidar ratio Sa(R) feeds the inversion</text>
+  <path class="wire" d="M360,320 V332" style="stroke:#0a7d5a"/>
+</svg>
+<figcaption><b>The full pipeline.</b> Part A turns one raw acquisition into NRB (Steps 1–10, with
+SNR/gating as a side branch); Part B runs on demand on that NRB — depolarization, the Rayleigh +
+overlap forward model, the Klett–Fernald inversion, and PBL/ALT layer detection.</figcaption>
+</figure>
+
+<!-- ===================== STEP 1 ===================== -->
+<section class="step">
+<h2 id="s1"><span class="stepbadge">1</span>Raw <code>.dat</code> ingest &amp; bin&nbsp;&rarr;&nbsp;range mapping</h2>
+<div class="phys"><b>The physics problem.</b> The TR40 writes an ASCII file with four columns per range
+bin: analog signal (mV), analog standard error, photon-counting rate (MHz), and photon standard
+error. The first block of bins is <i>pre-trigger</i> (recorded before the laser fires) and carries no
+atmospheric return &mdash; only baseline. Each remaining bin corresponds to a fixed round-trip time, so it
+maps to a geometric range.</div>
+<p>Range is a uniform grid anchored at the first true signal bin, and the time-per-bin follows from
+the range spacing (round-trip, hence the factor 2 and speed of light \(c\)):</p>
+<div class="eqn">
+$$R_i \;=\; R_0 + i\cdot \Delta R,\qquad i=0,1,\dots\tag{1a}$$
+$$\Delta t_{\text{bin}} \;=\; \frac{2\,\Delta R}{c}\times 10^{9}\ \text{ns},\qquad c=299\,792\,458\ \text{m/s}\tag{1b}$$
+</div>
+<p>With \(\Delta R = 3.75\) m this gives the expected 25&nbsp;ns bin (the code snaps to exactly 25.0&nbsp;ns
+when within 0.25&nbsp;ns).</p>
+<pre><code>range_m       = first_signal_range_m + np.arange(n) * dr_m          # (1a)
+bin_width_ns  = (2.0 * dr_m / 299792458.0) * 1e9                    # (1b)</code></pre>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>read_tr40_dat_ascii()</code>, <code>bin_width_ns_from_dr()</code>,
+<code>trim_pretrigger_tail()</code>. Config: <code>dr_m</code>=3.75, <code>pretrigger_bins</code>=1024,
+<code>first_signal_range_m</code>=3.75, <code>start_mode</code>="auto".</p>
+</section>
+
+<!-- ===================== STEP 2 ===================== -->
+<section class="step">
+<h2 id="s2"><span class="stepbadge">2</span>Dead-time (pile-up) correction of the photon channel</h2>
+<div class="phys"><b>The physics problem.</b> A photon-counting detector counts pulses one at a time; after
+each count there is a short "dead time" \(\tau_d\) during which the next photon is missed. The higher
+the true rate \(S\), the more counts are lost &mdash; so the measured rate \(N\) always under-reads.</div>
+<p>The code uses the <b>non-paralyzable</b> model (the standard choice for a PMT + discriminator that
+resets cleanly after \(\tau_d\)):</p>
+<div class="eqn">
+$$N \;=\; \frac{S}{1 + S\,\tau_d}\qquad\Longrightarrow\qquad
+S \;=\; \frac{N}{1 - N\,\tau_d}\tag{2}$$
+</div>
+<p>with \(N,S\) in MHz and \(\tau_d\) in ns (the factor \(10^{-3}\) in the code converts MHz&nbsp;&times;&nbsp;ns).
+The correction is only valid while \(N\tau_d < 1\); as \(N\tau_d\to1\) the denominator collapses, so the
+code returns <code>NaN</code> instead of a blow-up. For \(\tau_d = 3.06\)&nbsp;ns the model breaks near
+\(1/\tau_d \approx 326\)&nbsp;MHz &mdash; a hard ceiling that reappears in Step&nbsp;4.</p>
+<div class="why"><b>Why this must run before Steps 3&ndash;5.</b> The raw photon rate is a <i>non-linear</i>
+function of the true signal (Eq.&nbsp;2), so it cannot be regressed against the linear analog channel.
+Dead-time correction makes the photon channel linear again first; only then are the background
+(Step&nbsp;3, measured on the corrected rate) and the analog&#8596;photon fit (Step&nbsp;5) meaningful.</div>
+<pre><code>denom = 1.0 - rate_mhz * dead_time_ns * 1e-3        # (2), 1 - N&middot;&tau;_d
+photon_dt_mhz = rate_mhz / where(|denom|&lt;1e-12, nan, denom)</code></pre>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>dead_time_correct_mhz()</code>. Config: <code>dead_time_ns</code>=3.06.</p>
+</section>
+
+<!-- ===================== STEP 3 ===================== -->
+<section class="step">
+<h2 id="s3"><span class="stepbadge">3</span>Background estimation</h2>
+<div class="phys"><b>The physics problem.</b> On top of the atmospheric return sits a constant pedestal:
+daytime solar sky radiance plus electronic offset. It must be measured so it can be removed
+(Step&nbsp;6). Three gates are supported.</div>
+<table>
+<tr><th>Mode</th><th>Gate</th><th>Estimate</th></tr>
+<tr><td><code>pretrigger</code> (default)</td><td>the pre-trigger bins (before laser fire)</td><td>mean of the dead-time-corrected rate over those bins</td></tr>
+<tr><td><code>fixed</code></td><td>a user range window <code>[bg_start_m, bg_end_m]</code></td><td>mean over that window</td></tr>
+<tr><td><code>far_range</code></td><td>the far tail, \(0.88\,R_\max \le R \le 0.98\,R_\max\)</td><td>mean over that window</td></tr>
+</table>
+<div class="eqn">$$\text{BG} \;=\; \big\langle\, S_{\text{photon}}(R)\,\big\rangle_{\text{gate}}\tag{3}$$</div>
+<p>The background is computed on the <b>dead-time-corrected</b> rate (hence Step&nbsp;2 first), and its
+value is carried forward to Step&nbsp;6 and to the SNR (Step&nbsp;11).</p>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>extract_pretrigger_background()</code> and the BG branch in
+<code>build_single_profile()</code>. Config: <code>bg_mode</code>, <code>bg_start_m</code>,
+<code>bg_end_m</code>, <code>pretrigger_trim_bins</code>=24.</p>
+</section>
+
+<!-- ===================== STEP 4 ===================== -->
+<section class="step">
+<h2 id="s4"><span class="stepbadge">4</span>Day/night toggle-rate window</h2>
+<div class="phys"><b>The physics problem.</b> The glue (Step&nbsp;5) fits analog against photon only where
+<i>both</i> channels are trustworthy: photon not yet saturated, analog above its noise floor. That
+"toggle window" is a band of photon count rate \([\,\text{min\_toggle},\ \text{max\_toggle}\,]\). Both
+limits come from separate physics.</div>
+<p><b>Upper limit</b> &mdash; how much dead-time correction you are willing to trust. From Eq.&nbsp;(2) the
+correction factor is \((1-N\tau_d)^{-1}\); tolerating a fraction \(\varepsilon\) of correction gives</p>
+<div class="eqn">$$\text{max\_toggle} \;\approx\; \frac{\varepsilon}{\tau_d}\;\;\Rightarrow\;\;
+10\ \text{MHz}\ (\approx 3\%\ \text{correction at }\tau_d=3.06\ \text{ns}).\tag{4a}$$</div>
+<p><b>Lower limit</b> &mdash; must sit above the photon background floor and the analog 3&sigma; noise, so the
+descending rate genuinely crosses it:</p>
+<div class="eqn">$$\text{min\_toggle} \;=\; \max\!\big(k\,\sigma_{\text{analog}}G,\ \sim\!2\times\text{photon floor}\big)\;\approx\;2\ \text{MHz}.\tag{4b}$$</div>
+<div class="why"><b>Day vs night.</b> Daylight lifts the whole photon profile by a large solar pedestal, so
+the night window can end up with zero bins inside it. The code picks the window per profile: if the
+pre-trigger background exceeds <code>toggle_bg_switch_threshold_mhz</code> it uses the day rates,
+otherwise the night rates. This choice is what makes the daytime glue in Step&nbsp;5 possible.</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>select_toggle_rates()</code>. Config:
+<code>min/max_toggle_rate</code>=2.0/10.0 (night), <code>day_min/max_toggle_rate</code>,
+<code>toggle_bg_switch_threshold_mhz</code>=10.0, <code>auto_toggle_selector</code>=True.</p>
+</section>
+
+<!-- ===================== STEP 5 ===================== -->
+<section class="step">
+<h2 id="s5"><span class="stepbadge">5</span>Analog&#8596;photon glue <span class="pill new">centerpiece</span></h2>
+<div class="phys"><b>The physics problem.</b> The two channels measure the <i>same</i> backscatter through
+different detectors: analog is linear and unsaturated in the strong near field, photon counting is
+low-noise but saturates when strong. Over the range where both are linear, one is a straight-line
+rescaling of the other. "Glue" fits that line, converts analog into photon units, and blends the two
+into a single profile that is good at all ranges. This follows Licel &sect;9.7.5.</div>
+<h3>5a &middot; Regression (cross-calibration)</h3>
+<p>Least-squares fit over the toggle window from Step&nbsp;4:</p>
+<div class="eqn">
+$$\text{photon\_dt} \;\approx\; k\cdot\text{analog} + b\tag{5a}$$
+$$\text{analog\_scaled} \;=\; k\cdot\text{analog} + b\tag{5b}$$
+</div>
+<p>with fit quality \(r^2 = \max\!\big(0,\,1-\tfrac{SS_{\text{res}}}{SS_{\text{tot}}}\big)\) and
+\(\text{RMSE}=\sqrt{SS_{\text{res}}/n}\). Here \(k\) is the gain ratio between the two detectors and
+\(b\) the offset.</p>
+<h3>5b &middot; Toggle-rate cosine blend</h3>
+<p>Blend with a smooth weight \(w(R)\in[0,1]\) so there is no discontinuous seam. Let
+\(r_1,r_2\) be the blend-zone edges (auto-detected where the photon rate descends through the
+toggle limits):</p>
+<div class="eqn">
+$$w(R)=\begin{cases}
+0, & \text{photon}(R)\ge \text{max\_toggle}\quad(\text{near: use analog})\\[4pt]
+1, & \text{photon}(R)\le \text{min\_toggle}\quad(\text{far: use photon})\\[4pt]
+\dfrac{1-\cos\!\Big(\pi\,\dfrac{R-r_1}{r_2-r_1}\Big)}{2}, & r_1<R<r_2
+\end{cases}\tag{5c}$$
+$$\text{merged}(R)=\big(1-w(R)\big)\,\text{analog\_scaled}(R) + w(R)\,\text{photon\_dt}(R)\tag{5d}$$
+</div>
+<h3>5c &middot; Daytime BG-subtracted glue + quality guard <span class="pill new">2026&ndash;08</span></h3>
+<div class="phys"><b>The dawn/dusk problem.</b> Two raw profiles 30&nbsp;min apart (05:44 vs 06:14) are
+near-identical once the background is removed, yet the old logic sent the later one to
+<i>photon-only</i> because its background (&asymp;40&nbsp;MHz) exceeded the window &mdash; giving a wrong,
+saturated near field. Root cause: a high solar background lifts the whole photon profile above the
+[2,&nbsp;10]&nbsp;MHz toggle window, so <b>zero bins</b> fall inside it and the fit cannot run.</div>
+<p><b>Fix (<code>gluing_mode="auto_bgsub_guarded"</code>).</b> Select the fit region and blend zone on the
+signal <i>above background</i>, \(\text{photon}_{\text{toggle}}=\text{photon\_dt}-\text{BG}\), so the glue
+runs again when BG is high (the regression target and the glued output still use the full
+\(\text{photon\_dt}\); BG is removed later in Step&nbsp;6). This is exactly Licel &sect;9.7.5:
+"background above min toggle &rarr; use the scaled analog."</p>
+<p><b>Quality guard.</b> If the analog&#8596;photon fit is poor &mdash; the analog channel degraded by daytime
+clipping or PMT protection &mdash; the glue is <i>not</i> trusted and the profile falls back to photon-only:</p>
+<div class="eqn">
+$$\text{reject glue}\ \Longleftrightarrow\ \big(r^2 < r^2_{\min}\big)\ \text{ or }\ \big(k\le 0\big),
+\qquad r^2_{\min}=0.85.\tag{5e}$$
+</div>
+<figure>
+<svg viewBox="0 0 720 300" role="img" aria-label="Daytime background lifts the profile above the toggle window; BG-subtraction restores the glue">
+  <defs>
+    <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5b6270"/></marker>
+    <style>
+      .ax{stroke:#8a93a3;stroke-width:1.2}
+      .axl{fill:#5b6270;font-size:11px}
+      .ti{fill:#1a1c20;font-size:12px;font-weight:600}
+      .band{fill:#0b5cad;opacity:.10}
+      .bandl{fill:#0b5cad;font-size:10.5px;font-weight:600}
+      .night{stroke:#0a7d5a;stroke-width:2;fill:none}
+      .day{stroke:#a15c00;stroke-width:2;fill:none}
+      .dayd{stroke:#a15c00;stroke-width:2;fill:none;stroke-dasharray:5 4}
+      .note{fill:#5b6270;font-size:10.5px}
+    </style>
+  </defs>
+
+  <!-- LEFT panel: problem -->
+  <text class="ti" x="20" y="20">Before: high background lifts the photon profile</text>
+  <line class="ax" x1="40" y1="40" x2="40" y2="250"/>
+  <line class="ax" x1="40" y1="250" x2="330" y2="250"/>
+  <text class="axl" x="8" y="46" transform="rotate(-90 8,46)"></text>
+  <text class="axl" x="46" y="52">photon rate (MHz)</text>
+  <text class="axl" x="250" y="268">range →</text>
+  <!-- toggle window band -->
+  <rect class="band" x="40" y="150" width="290" height="70"/>
+  <text class="bandl" x="250" y="145">toggle window [2,10] MHz</text>
+  <line x1="40" y1="150" x2="330" y2="150" stroke="#0b5cad" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="40" y1="220" x2="330" y2="220" stroke="#0b5cad" stroke-width="1" stroke-dasharray="3 3"/>
+  <!-- night profile: descends through the window -->
+  <path class="night" d="M55,60 C110,70 150,140 200,185 C240,215 290,238 320,244"/>
+  <!-- day profile: same shape but lifted, sits ABOVE window -->
+  <path class="day" d="M55,55 C110,63 150,95 200,120 C250,140 300,150 320,150"/>
+  <text class="note" x="70" y="80" fill="#0a7d5a">night: crosses window ✓</text>
+  <text class="note" x="150" y="112" fill="#a15c00">day: floats above → 0 fit bins ✗</text>
+
+  <!-- arrow between -->
+  <path d="M340,150 H375" class="ax" marker-end="url(#ar2)"/>
+  <text class="note" x="342" y="142">BG&ndash;subtract</text>
+
+  <!-- RIGHT panel: fix -->
+  <text class="ti" x="392" y="20">After: subtract BG, then blend</text>
+  <line class="ax" x1="410" y1="40" x2="410" y2="250"/>
+  <line class="ax" x1="410" y1="250" x2="700" y2="250"/>
+  <text class="axl" x="416" y="52">signal − BG (MHz)</text>
+  <text class="axl" x="620" y="268">range →</text>
+  <rect class="band" x="410" y="150" width="290" height="70"/>
+  <text class="bandl" x="620" y="145">toggle window</text>
+  <line x1="410" y1="150" x2="700" y2="150" stroke="#0b5cad" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="410" y1="220" x2="700" y2="220" stroke="#0b5cad" stroke-width="1" stroke-dasharray="3 3"/>
+  <!-- day profile now lands in the window (same as night) -->
+  <path class="dayd" d="M425,60 C480,70 520,140 570,185 C610,215 660,238 690,244"/>
+  <!-- cosine blend weight overlay -->
+  <path d="M425,235 C500,235 540,120 585,95 C640,70 680,66 690,65" stroke="#0b5cad" stroke-width="1.6" fill="none" stroke-dasharray="2 3"/>
+  <text class="note" x="430" y="205" fill="#a15c00">day now crosses window ✓ → glue runs</text>
+  <text class="note" x="600" y="80" fill="#0b5cad">w(R): analog→photon</text>
+</svg>
+<figcaption><b>Step 5c, the dawn fix.</b> A high solar background (left, orange) lifts the whole photon
+profile above the [2,10]&nbsp;MHz toggle window, so no bins qualify for the fit and the old logic gave
+up to photon-only. Selecting the window on <i>signal&nbsp;−&nbsp;BG</i> (right) puts the same profile back
+inside the window; the cosine weight \(w(R)\) then blends scaled analog (near) into photon (far).
+An \(r^2\ge0.85\) guard rejects the glue when the analog itself is degraded (full midday).</figcaption>
+</figure>
+
+<p class="lead">Verified on real dawn data (04-21): backgrounds 13/40/123&nbsp;MHz all glue with
+\(r^2=0.99/0.99/0.98\), and the near-field magnitude at 1&nbsp;km (1790) becomes comparable to the
+adjacent night profile (1957) instead of a saturated photon-only value. Full midday
+(\(r^2\le0.54\)) is correctly rejected by the guard and left as photon-only. Night glue is unchanged
+and matches the lab's LabVIEW processing.</p>
+<pre><code>slope, offset, r2, rmse, n = linear_regression_stats(analog[fit], photon_dt[fit])  # (5a)
+analog_scaled = slope * analog + offset                                            # (5b)
+guard_failed  = (mode == "auto_bgsub_guarded") and not (r2 &gt;= 0.85 and slope &gt; 0)   # (5e)
+if any(isfinite(analog_scaled)) and not guard_failed:
+    w = cosine_taper_weight(r, r1, r2)          # (5c)
+    w[photon_toggle &gt; max_toggle] = 0.0         # near -> analog
+    w[photon_toggle &lt; min_toggle] = 1.0         # far  -> photon
+    glued = (1 - w) * analog_scaled + w * photon_dt                                 # (5d)
+else:
+    glued = photon_dt.copy()                    # photon-only fallback</code></pre>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>compute_nrb_reference_glue()</code>,
+<code>linear_regression_stats()</code>, <code>cosine_taper_weight()</code>,
+<code>auto_find_blend_zone_from_threshold_crossings()</code>. Config: <code>gluing_mode</code>,
+<code>auto_blend</code>=True, <code>blend_r1_m/r2_m</code>, <code>day_glue_min_r2</code>=0.85.</p>
+</section>
+
+<!-- ===================== STEP 6 ===================== -->
+<section class="step">
+<h2 id="s6"><span class="stepbadge">6</span>Background subtraction</h2>
+<div class="phys"><b>The physics problem.</b> Remove the pedestal measured in Step&nbsp;3 from the glued
+profile, so that only the true atmospheric return remains.</div>
+<div class="eqn">$$\text{glued\_bgsub}(R) \;=\; \text{merged}(R) - \text{BG}\tag{6}$$</div>
+<div class="why"><b>Why after glue, not before.</b> The blend (Step&nbsp;5) is applied to <i>every</i> bin
+including pre-trigger, so the pre-trigger portion of the merged profile is itself the cleanest
+background reference. Subtracting a single scalar BG afterwards keeps analog and photon on the same
+zero level.</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; master chain in <code>compute_nrb_reference_glue()</code>.</p>
+</section>
+
+<!-- ===================== STEP 7 ===================== -->
+<section class="step">
+<h2 id="s7"><span class="stepbadge">7</span>Afterpulse correction <span class="pill opt">optional</span></h2>
+<div class="phys"><b>The physics problem.</b> Photo-electrons trapped in the PMT dynodes are released
+later in time, producing a range-dependent "ghost signal" &mdash; the afterpulse \(A(R)\). It is a
+detector-side artifact (independent of the atmosphere), so it is subtracted before any geometric
+correction.</div>
+<div class="eqn">$$\text{glued\_ap}(R) \;=\; \text{glued\_bgsub}(R) - A(R)\tag{7}$$</div>
+<p>\(A(R)\) is measured separately (capped/blocked telescope) and supplied on the same range grid; if
+not provided, the step is skipped. On this system the afterpulse has not yet been reliably measured
+(low SNR), so it is usually off.</p>
+<p class="fn"><code>nrb_engine.py</code> &middot; applied when <code>afterpulse_A_R</code> is supplied
+(array from <code>afterpulse.py</code>).</p>
+</section>
+
+<!-- ===================== STEP 8 ===================== -->
+<section class="step">
+<h2 id="s8"><span class="stepbadge">8</span>Overlap correction \(O(R)\) <span class="pill opt">optional</span></h2>
+<div class="phys"><b>The physics problem.</b> Because the laser and the telescope have separate axes
+(biaxial geometry), the beam and the field of view do not fully overlap in the near field. The
+overlap function \(O(R)\in[0,1]\) rises from 0 to 1 over the first few hundred metres; without
+correcting it, near-range backscatter reads artificially low.</div>
+<div class="eqn">
+$$\text{glued\_oc}(R)=\frac{\text{glued\_ap}(R)}{\max\!\big(O(R),\,10^{-12}\big)},\qquad
+\text{NaN where } O(R) < O_{\min}.\tag{8}$$
+</div>
+<p>Ranges where \(O(R)<O_{\min}\) (default 0.1) are set to <code>NaN</code> rather than divided, so
+near-range noise is not amplified to meaningless values. \(O(R)\) itself is produced separately &mdash;
+analytically (Gaussian beam + Rice-CDF geometry) or from a file &mdash; and is out of scope here.</p>
+<p class="fn"><code>nrb_engine.py</code> applies <code>overlap_O_R</code> (from <code>overlap.py</code>).
+Config: <code>overlap_O_min</code>=0.1.</p>
+</section>
+
+<!-- ===================== STEP 9 ===================== -->
+<section class="step">
+<h2 id="s9"><span class="stepbadge">9</span>Range&sup2; correction + energy normalization &rarr; NRB</h2>
+<div class="phys"><b>The physics problem.</b> The lidar return falls off as \(1/R^2\) purely from the
+inverse-square spreading of light (the \(A/R^2\) term in Eq.&nbsp;L). Multiplying by \(R^2\) undoes it.
+Dividing by the laser pulse energy \(E\) makes profiles from different shots comparable &mdash; the
+"Normalized" in NRB.</div>
+<div class="eqn">
+$$\text{NRB}_{\text{phys}}(R) \;=\; \text{glued\_oc}(R)\cdot R^{2}\;\big/\;E,
+\qquad E=\text{energy\_mJ}\times10^{-3}\ \text{J}.\tag{9}$$
+</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>nrb_final</code> column. Config: <code>energy_mj</code>=25.0.</p>
+</section>
+
+<!-- ===================== STEP 10 ===================== -->
+<section class="step">
+<h2 id="s10"><span class="stepbadge">10</span>Max normalization (0&ndash;1 profile)</h2>
+<div class="phys"><b>The physics problem.</b> For plotting and comparing profile <i>shapes</i>, a unit-max
+profile is convenient.</div>
+<div class="eqn">$$\text{NRB}(R) \;=\; \frac{\text{NRB}_{\text{phys}}(R)}{\max_R \text{NRB}_{\text{phys}}(R)}\tag{10}$$</div>
+<div class="why"><b>Two columns, on purpose.</b> The pipeline keeps both <code>nrb_final</code> (physical
+units, Eq.&nbsp;9) and <code>nrb</code> (unit-max, Eq.&nbsp;10). The depolarization step deliberately uses the
+<i>physical</i> <code>nrb_final</code> so the &#8741; and &#8869; channels stay on a common scale and their
+ratio is meaningful.</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>nrb_final</code> vs <code>nrb</code>.</p>
+</section>
+
+<!-- ===================== STEP 11 ===================== -->
+<section class="step">
+<h2 id="s11"><span class="stepbadge">11</span>Signal-to-noise ratio (SNR)</h2>
+<div class="phys"><b>The physics problem.</b> Photon counting obeys Poisson (shot) noise. The TR40 reports a
+per-bin error which, per the Licel manual (&sect;9.3), is the <b>standard error of the mean</b>
+\(\sigma_\mu\) of the raw rate &mdash; not a raw standard deviation. Over \(N\) laser shots with per-shot
+counts \(x_i\), the transient recorder cannot expose each \(x_i\), so it accumulates the squared sums
+and stores \(\sigma_\mu\):</div>
+<div class="eqn">
+$$s=\frac{\text{sqd}}{\sqrt{N(N-1)}},\quad
+\text{sqd}=\sqrt{N\!\sum_i x_i^{2}-\Big(\sum_i x_i\Big)^{2}},\qquad
+\sigma_\mu=\frac{s}{\sqrt{N}}\tag{11a}$$
+</div>
+<p>The signal we form the SNR against is the <i>dead-time-corrected</i> rate from Step&nbsp;2,
+\(N_{\text{corr}}=N/(1-N\tau_d)\). That correction is non-linear, so the error must be propagated the
+same way &mdash; numerator and denominator have to describe the <i>same</i> quantity:</p>
+<div class="eqn">
+$$\sigma_{\text{corr}}=\sigma_\mu\left|\frac{dN_{\text{corr}}}{dN}\right|=\frac{\sigma_\mu}{(1-N\tau_d)^{2}},
+\qquad
+\text{SNR}(R)=\frac{N_{\text{corr}}(R)-\text{BG}}{\sigma_{\text{corr}}(R)}\;\approx\;(1-N\tau_d)\,\text{SNR}_{\text{raw}}\tag{11b}$$
+</div>
+<div class="why"><b>Scale-invariant for the later steps &mdash; so SNR of NRB = SNR of photon.</b> Every
+operation <i>after</i> Step&nbsp;5 (\(\times R^2\), \(\div O\), \(\div E\), \(\div\max\)) is linear: it
+multiplies signal and noise by the same factor, cancelling in the ratio. So the SNR computed here on the
+photon rate <i>is</i> the SNR of the final NRB, and can gate it directly in Step&nbsp;12. The dead-time
+correction is the one non-linear step, which is exactly why its error is propagated in (11b): the net
+effect \(\text{SNR}_{\text{corr}}=(1-N\tau_d)\,\text{SNR}_{\text{raw}}\) is negligible in the far field
+(\(N\tau_d\to0\), where the trusted-range cutoff sits) and an honest reduction in the near field, where
+correcting near-saturated counts amplifies noise. The farthest bin with \(\text{SNR}\ge3\) is stored as
+<code>trusted_range_snr3_m</code>.</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; SNR in <code>build_single_profile()</code>; keeps the raw
+\(\sigma_\mu\) as <code>photon_stderr_MHz</code> and the propagated \(\sigma_{\text{corr}}\) as
+<code>photon_stderr_dt_MHz</code>. The .dat error columns are Licel descriptors <code>S2A</code>
+(analog) / <code>S2P</code> (photon), i.e. the squared-sum-derived \(\sigma_\mu\) of&nbsp;(11a).</p>
+</section>
+
+<!-- ===================== STEP 12 ===================== -->
+<section class="step">
+<h2 id="s12"><span class="stepbadge">12</span>SNR gating / trusted-range normalization <span class="pill opt">optional</span></h2>
+<div class="phys"><b>The physics problem.</b> In daylight the far field is pure noise, and a max-normalization
+(Step&nbsp;10) can lock onto a noise spike, corrupting the whole profile (a spurious \(R^2\)-amplified
+ramp). Gating restricts the profile to the contiguous range that is genuinely above noise.</div>
+<p><b>Method.</b> Smooth the SNR with a rolling median (window <code>SNR_SMOOTH_BINS</code>=15), then walk
+up from the SNR peak until the smoothed SNR drops below <code>snr_min</code>. Everything above that
+contiguous "trusted top" is masked, and the profile is re-normalized within
+\(\min(\text{top},\,\text{SNR\_NORM\_CAP\_M}=6000\ \text{m})\).</p>
+<div class="why"><b>Why contiguous, not per-bin.</b> A per-bin threshold lets ~25% of far-field noise bins
+randomly exceed 3&sigma;, scattering fake points across the plot. A single contiguous cutoff from a
+smoothed SNR is stable.</div>
+<p class="fn"><code>nrb_engine.py</code> &middot; <code>snr_trusted_top()</code>, <code>snr_gate_nrb()</code>,
+<code>_rolling_median()</code>. Config: <code>snr_gate</code> (default False), <code>snr_min</code>=3.0.</p>
+</section>
+
+<!-- ===================== DEPOL ===================== -->
+<section class="step">
+<h2 id="depol">Depolarization ratio (VDR)</h2>
+<div class="phys"><b>The physics problem.</b> A polarizing beam splitter sends the return to two PMTs:
+parallel (&#8741;, co-pol) and perpendicular (&#8869;, cross-pol). Their ratio measures how much the target
+depolarizes the light &mdash; near 0 for spherical particles (fine aerosol), large for irregular ones
+(dust, ice). Because range&sup2;, overlap, transmission and energy are common to both channels, they
+cancel in the ratio; only a fixed gain constant \(C\) remains, set by calibration in clean air.</div>
+<p>Each channel is processed through the whole Part&nbsp;A chain (background- and afterpulse-corrected,
+before the overlap/\(R^2\) steps), then:</p>
+<div class="eqn">
+$$\delta^{*}(R)=\frac{P_{\perp}(R)}{P_{\parallel}(R)}\tag{D1}$$
+$$C=\frac{\big\langle\delta^{*}\big\rangle_{\text{clean}}}{\delta_{\text{mol}}}
+\quad(\text{over } R\in[\,r_{\min},r_{\max}\,]\ \text{clean air})\tag{D2}$$
+$$\delta_v(R)=\frac{\delta^{*}(R)}{C}\tag{D3}$$
+</div>
+<p>with molecular depolarization \(\delta_{\text{mol}}=0.0044\) (narrowband, 532&nbsp;nm). \(\delta^{*}\) is
+set <code>NaN</code> where the parallel signal is below a noise floor, and \(\delta_v\) is masked where
+the cross-pol SNR &lt; <code>snr_min</code>. The calibration window default is 4500&ndash;5500&nbsp;m. A
+<b>single-channel mode</b> also exists (process &#8741; or &#8869; alone) for experiments where the two
+polarizations are measured on different days.</p>
+<div class="why"><b>Terminology note.</b> User-facing labels are &#8741;/&#8869;; internally (sheet names,
+columns, filenames) the channels stay <code>co</code>/<code>cross</code>. Also note this system's
+\(\delta = \text{cross}/\text{co}\) differs from the Mini-MPL convention
+\(\delta_{\text{MPL}} = \text{cross}/(\text{cross}+\text{co})\) &mdash; convert before validating against MPL.</div>
+<p class="fn"><code>depol_engine.py</code> &middot; <code>compute_depolarization()</code>,
+<code>build_single_channel_for_file()</code>. Constants <code>DELTA_MOL_532_NARROW</code>=0.0044,
+<code>DELTA_MOL_532_BROAD</code>=0.0144. Config: <code>cal_rmin_m</code>/<code>cal_rmax_m</code>,
+<code>delta_mol</code>, <code>snr_min</code>, <code>snr_gate</code>.</p>
+</section>
+
+<!-- ===================== PART B HEADER ===================== -->
+<section class="step">
+<div class="parthead">
+  <h2 id="partb">Part B &mdash; On-demand aerosol retrieval</h2>
+  <p>Everything above produces the calibrated NRB (and depolarization). The steps below run
+  <i>on that NRB</i>, when a quantitative aerosol product is wanted. They are not part of the routine
+  per-file chain because each needs a physical choice from the operator (a clean reference range, a
+  lidar ratio) or external inputs.</p>
+</div>
+
+<!-- ===================== B1 RAYLEIGH ===================== -->
+<h3 id="rayleigh" style="font-size:19px;margin-top:24px">B1 &middot; Rayleigh molecular model</h3>
+<div class="phys"><b>The physics problem.</b> To separate aerosol from air, the inversion needs the
+<i>molecular</i> backscatter and extinction the clean atmosphere would give on its own. These follow
+from air number density, which follows from a standard-atmosphere temperature/pressure profile.</div>
+<p>Troposphere from the US&nbsp;Standard Atmosphere (ISO&nbsp;2533), then ideal-gas number density and
+Rayleigh scattering:</p>
+<div class="eqn">
+$$T(h)=T_0-L\,h,\qquad P(h)=P_0\Big(\tfrac{T}{T_0}\Big)^{g/(L R_d)}\tag{B1a}$$
+$$N=\frac{P}{k_B T},\qquad \beta_{\text{mol}}(R)=N\,\sigma_{\text{mol}},\qquad
+\alpha_{\text{mol}}(R)=\frac{8\pi}{3}\,\beta_{\text{mol}}(R)\tag{B1b}$$
+</div>
+<p>with \(\sigma_{\text{mol},532}=5.45\times10^{-32}\ \text{m}^2/\text{sr}\), molecular lidar ratio
+\(S_m=8\pi/3\approx8.38\ \text{sr}\), and standard constants
+(\(T_0=288.15\)&nbsp;K, \(P_0=101325\)&nbsp;Pa, \(L=0.0065\)&nbsp;K/m, \(g=9.80665\), \(R_d=287.05\),
+\(k_B=1.380649\times10^{-23}\)).</p>
+<p class="fn"><code>fernald_engine.py</code> &middot; <code>us_standard_atmosphere()</code>,
+<code>molecular_backscatter_532()</code>, <code>molecular_extinction()</code>.
+(A scalar \(T,P\) shortcut exists for a single-layer approximation.)</p>
+
+<!-- ===================== B2 OVERLAP ===================== -->
+<h3 id="overlap" style="font-size:19px;margin-top:30px">B2 &middot; Overlap function \(O(R)\) (analytical)</h3>
+<div class="phys"><b>The physics problem.</b> The \(O(R)\) that Step&nbsp;8 divides out has to come from
+somewhere. For the biaxial geometry it can be modelled from first principles: a Gaussian laser beam
+imaged onto a circular field stop, offset by the laser&ndash;telescope baseline. The fraction of the
+beam image falling inside the field stop is a Rice cumulative distribution (Kumar &amp; Rocadenbosch,
+2013).</div>
+<div class="eqn">
+$$\sigma_{\text{beam}}=\sqrt{\sigma_0^{2}+(\sigma_\theta R)^{2}},\qquad
+\sigma_{\text{img}}=\frac{f}{R}\,\sigma_{\text{beam}}\tag{B2a}$$
+$$\delta=\frac{\big|f\,(d_\perp-\text{tilt}\cdot R)\big|}{R},\qquad
+O(R)=\mathrm{Rice\text{-}CDF}\!\Big(x=\tfrac{r_{\text{fs}}}{\sigma_{\text{img}}},\ b=\tfrac{\delta}{\sigma_{\text{img}}}\Big)\tag{B2b}$$
+</div>
+<p>clipped to \([0,1]\) and set to 0 below 1&nbsp;mm range. Hardware (NARIT TR40): focal length
+\(f=2032\)&nbsp;mm, aperture \(D=203\)&nbsp;mm, baseline \(d_\perp=156\)&nbsp;mm, field-stop diameter
+8&nbsp;mm (\(r_{\text{fs}}=4\)&nbsp;mm). An empirical \(O(R)\) from a file can be used instead.</p>
+<figure>
+<svg viewBox="0 0 460 190" role="img" aria-label="Overlap function rising from 0 to 1">
+  <defs><style>.oc{stroke:#0b5cad;stroke-width:2.4;fill:none}.oa{stroke:#8a93a3;stroke-width:1.2}.ol{fill:#5b6270;font-size:11px}</style></defs>
+  <line class="oa" x1="50" y1="20" x2="50" y2="150"/>
+  <line class="oa" x1="50" y1="150" x2="430" y2="150"/>
+  <line x1="50" y1="40" x2="430" y2="40" stroke="#c7d2df" stroke-width="1" stroke-dasharray="3 3"/>
+  <text class="ol" x="20" y="44">1.0</text><text class="ol" x="24" y="153">0</text>
+  <text class="ol" x="55" y="34">O(R)</text>
+  <text class="ol" x="360" y="168">range →</text>
+  <path class="oc" d="M50,150 C120,150 150,150 175,120 C205,84 235,48 300,42 C360,40 400,40 430,40"/>
+  <line x1="175" y1="150" x2="175" y2="40" stroke="#a15c00" stroke-width="1" stroke-dasharray="4 3"/>
+  <text class="ol" x="120" y="130" fill="#a15c00">O &lt; O_min → NaN</text>
+  <text class="ol" x="300" y="62" fill="#0b5cad">full overlap</text>
+</svg>
+<figcaption><b>Overlap correction (Step 8 uses this).</b> Near range where \(O(R)<O_{\min}\) (0.1) is
+discarded rather than amplified; beyond full overlap the correction is negligible.</figcaption>
+</figure>
+<p class="fn"><code>overlap.py</code> &middot; <code>compute_analytical_overlap()</code>,
+<code>load_empirical_overlap()</code>, <code>get_overlap()</code>; <code>mode</code> =
+disabled&nbsp;/&nbsp;analytical&nbsp;/&nbsp;file. Output feeds <code>nrb_engine</code> Step&nbsp;8 as
+<code>overlap_O_R</code>.</p>
+
+<!-- ===================== B3 FERNALD ===================== -->
+<h3 id="fernald" style="font-size:19px;margin-top:30px">B3 &middot; Klett&ndash;Fernald inversion &amp; aerosol products</h3>
+<div class="phys"><b>The physics problem.</b> The NRB still mixes backscatter with two-way transmission
+(the \(\exp[-2\!\int\alpha]\) term in Eq.&nbsp;L). The Fernald (1984) method separates aerosol from
+molecular backscatter by integrating the lidar equation <i>backward</i> from a clean reference range
+where the aerosol contribution is known (usually zero), using an assumed aerosol lidar ratio
+\(S_a\).</div>
+<p>Input is the range-corrected signal \(S(R)=P(R)\,R^{2}\) (i.e. the NRB). With molecular lidar ratio
+\(S_m=8\pi/3\), the backward recursion from the reference bin \(i_{\text{ref}}\) is:</p>
+<div class="eqn">
+$$\beta_{\text{tot}}[i_{\text{ref}}]=\beta_{\text{aer,ref}}+\beta_{\text{mol}}[i_{\text{ref}}]\tag{B3a}$$
+$$A=(S_a-S_m)\big(\beta_{\text{mol}}[i{+}1]+\beta_{\text{mol}}[i]\big)\Delta R,\qquad
+X_i=S[i]\,e^{A}\tag{B3b}$$
+$$\beta_{\text{tot}}[i]=\frac{X_i}{\dfrac{X_{i+1}}{\beta_{\text{tot}}[i+1]}+S_a\big(X_i+X_{i+1}\big)\Delta R}
+\;\;\Rightarrow\;\;\beta_{\text{aer}}=\beta_{\text{tot}}-\beta_{\text{mol}}\tag{B3c}$$
+</div>
+<p>Then the aerosol extinction, column optical depth, and (optionally) mass concentration:</p>
+<div class="eqn">
+$$\alpha_{\text{aer}}=S_a\,\beta_{\text{aer}},\qquad
+\text{AOD}=\int \alpha_{\text{aer}}\,dR,\qquad
+\text{mass}=\frac{\alpha_{\text{aer}}}{\sigma_{\text{ext}}}\times10^{6}\ [\mu g/m^{3}]\tag{B3d}$$
+</div>
+<div class="why"><b>Coupling to depolarization.</b> \(S_a\) can be a single value or a height-resolved
+\(S_a(R)\) derived from the depolarization ratio \(\delta_v(R)\) (dust has a higher lidar ratio than
+fine pollution), linking Part&nbsp;B back to the VDR. A Klett (1981) power-law inversion is also
+available as an alternative.</div>
+<figure>
+<svg viewBox="0 0 480 190" role="img" aria-label="Fernald backward integration from a clean reference range">
+  <defs>
+    <marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0a7d5a"/></marker>
+    <style>.fa{stroke:#8a93a3;stroke-width:1.2}.fl{fill:#5b6270;font-size:11px}.fp{stroke:#0b5cad;stroke-width:2;fill:none}</style>
+  </defs>
+  <line class="fa" x1="50" y1="20" x2="50" y2="150"/>
+  <line class="fa" x1="50" y1="150" x2="450" y2="150"/>
+  <text class="fl" x="55" y="34">β(R)</text>
+  <text class="fl" x="380" y="168">range →</text>
+  <path class="fp" d="M55,120 C110,90 150,70 200,95 C250,120 300,80 350,70 C380,64 410,60 430,58"/>
+  <!-- reference range -->
+  <line x1="430" y1="150" x2="430" y2="42" stroke="#a15c00" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <circle cx="430" cy="58" r="4" fill="#a15c00"/>
+  <text class="fl" x="352" y="36" fill="#a15c00">R_ref (clean air)</text>
+  <text class="fl" x="360" y="52" fill="#a15c00">β_aer ≈ 0</text>
+  <!-- backward arrow -->
+  <path d="M420,168 H70" stroke="#0a7d5a" stroke-width="1.6" marker-end="url(#ar3)"/>
+  <text class="fl" x="150" y="184" fill="#0a7d5a">integrate backward (far → near)</text>
+</svg>
+<figcaption><b>Fernald backward inversion.</b> Anchored at a clean reference range where
+\(\beta_{\text{aer}}\!\approx\!0\), the recursion (B3a–c) marches toward the instrument, solving for
+\(\beta_{\text{aer}}(R)\) at each bin.</figcaption>
+</figure>
+<p class="fn"><code>fernald_engine.py</code> &middot; <code>fernald_inversion()</code>,
+<code>klett_inversion()</code>, <code>lidar_ratio_from_delta()</code>,
+<code>compute_mass_concentration()</code>, <code>compute_fernald_from_nrb_df()</code>. Config:
+<code>R_ref_m</code>=5000, <code>lidar_ratio_aer</code>=50, <code>method</code>=fernald/klett.</p>
+
+<!-- ===================== B4 PBL ===================== -->
+<h3 id="pbl" style="font-size:19px;margin-top:30px">B4 &middot; PBL / aerosol layer-top (ALT) detection</h3>
+<div class="phys"><b>The physics problem.</b> The top of the aerosol layer (planetary boundary layer, or
+a lofted layer) shows up as a sharp <i>drop</i> in backscatter with height. It is found by locating the
+strongest falling edge in a smoothed NRB profile.</div>
+<p>Two operators: an FFT low-pass to remove bin-scale noise, then a Haar wavelet covariance transform
+(HWCT) whose value is large where the profile steps down:</p>
+<div class="eqn">
+$$H(f)=\frac{1}{\sqrt{1+(f/f_c)^{2\,\text{order}}}},\qquad f_c\approx0.015\ \text{cyc/m}\ (\sim67\ \text{m})\tag{B4a}$$
+$$W[i]=\big\langle\text{NRB}\big\rangle_{\text{right half}}-\big\langle\text{NRB}\big\rangle_{\text{left half}}\tag{B4b}$$
+</div>
+<p>The layer top is the range of the <b>most-negative</b> \(W\) peak (strongest falling edge); a positive
+edge is used only if no falling edge exists. Cloud layers are screened separately
+(\(\text{OD}\approx0.5\ln(\text{NRB}_{\text{below}}/\text{NRB}_{\text{above}})\)) and the ALT can be
+temporally smoothed across a day.</p>
+<figure>
+<svg viewBox="0 0 480 200" role="img" aria-label="NRB profile and its HWCT, with the layer top at the most negative HWCT peak">
+  <defs><style>.pa{stroke:#8a93a3;stroke-width:1.2}.pl{fill:#5b6270;font-size:11px}</style></defs>
+  <line class="pa" x1="50" y1="20" x2="50" y2="160"/>
+  <line class="pa" x1="50" y1="160" x2="450" y2="160"/>
+  <text class="pl" x="55" y="34">NRB</text>
+  <text class="pl" x="380" y="178">range →</text>
+  <!-- NRB with a step-down at layer top -->
+  <path d="M55,60 C130,58 200,62 250,66 C270,68 275,120 300,132 C340,150 400,154 445,156" stroke="#0b5cad" stroke-width="2" fill="none"/>
+  <!-- HWCT curve, negative dip at the step -->
+  <path d="M55,110 C150,108 220,108 255,108 C275,108 282,150 292,150 C302,150 308,112 330,110 C380,108 420,110 445,110" stroke="#0a7d5a" stroke-width="1.8" fill="none" stroke-dasharray="5 3"/>
+  <line x1="292" y1="160" x2="292" y2="60" stroke="#a15c00" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <text class="pl" x="298" y="52" fill="#a15c00">layer top (ALT)</text>
+  <text class="pl" x="150" y="102" fill="#0a7d5a">W(R) — Haar covariance</text>
+  <text class="pl" x="255" y="146" fill="#0a7d5a">most-negative peak</text>
+</svg>
+<figcaption><b>ALT by HWCT.</b> The Haar covariance \(W(R)\) dips most negative exactly where the NRB
+steps down — that range is reported as the layer top.</figcaption>
+</figure>
+<p class="fn"><code>pbl_engine.py</code> &middot; <code>fft_lowpass_fixed_fc()</code>,
+<code>hwct_haar_step_right_minus_left()</code>, <code>compute_pbl_for_profile()</code>,
+<code>denoise_profile_preserve_shape()</code>. Constants <code>FC_CYCLES_PER_M</code>=0.015,
+<code>FFT_ORDER</code>=6, <code>HWCT_TOL_M</code>=22.5.</p>
+
+<p class="callout" style="padding:12px 16px"><b>Validation inputs (readers only, no theory here).</b>
+The Mini-MPL <code>.nc</code>/CSV reference products (<code>mpl_reader.py</code>, UTC&rarr;local +7&nbsp;h) and
+AERONET column AOD via Ångström interpolation to 532&nbsp;nm (<code>aeronet_loader.py</code>) are loaded
+purely to compare against our NRB, ALT, and Fernald AOD.</p>
+</section>
+
+<!-- ===================== APPENDIX ===================== -->
+<section class="step">
+<h2 id="appendix">Appendix</h2>
+
+<h3>A &middot; Dependency chain</h3>
+<p>Solid arrows are required order; SNR branches off the corrected photon rate and the background:</p>
+<pre><code>Step 1 (ingest)
+   +--&gt; Step 2 (dead-time) --+--&gt; Step 3 (background) --+
+                            |                          |
+                            +--------------------------+--&gt; Step 4 (toggle window)
+                                                            +--&gt; Step 5 (glue)
+                                                                  +--&gt; Step 6 (bg subtract)
+                                                                        +--&gt; Step 7 (afterpulse, opt)
+                                                                              +--&gt; Step 8 (overlap, opt)
+                                                                                    +--&gt; Step 9 (R&sup2; / energy -&gt; NRB)
+                                                                                          +--&gt; Step 10 (max norm)
+Step 11 (SNR)  = f( Step 2 photon_dt , Step 3 BG )   -- scale-invariant, so SNR of NRB
+Step 12 (SNR gate, opt) applied after Steps 9-11</code></pre>
+
+<h3>B &middot; Key configuration parameters</h3>
+<table>
+<tr><th>Key</th><th>Default</th><th>Used in</th><th>Meaning</th></tr>
+<tr><td><code>dr_m</code></td><td>3.75 m</td><td>1</td><td>range spacing per bin</td></tr>
+<tr><td><code>pretrigger_bins</code></td><td>1024</td><td>1, 3</td><td>bins before laser fire</td></tr>
+<tr><td><code>dead_time_ns</code></td><td>3.06 ns</td><td>2</td><td>detector dead time \(\tau_d\)</td></tr>
+<tr><td><code>bg_mode</code></td><td>pretrigger</td><td>3</td><td>background gate</td></tr>
+<tr><td><code>min/max_toggle_rate</code></td><td>2.0 / 10.0 MHz</td><td>4, 5</td><td>night glue window</td></tr>
+<tr><td><code>toggle_bg_switch_threshold_mhz</code></td><td>10.0</td><td>4</td><td>day/night switch on BG</td></tr>
+<tr><td><code>gluing_mode</code></td><td>auto&nbsp;/&nbsp;auto_bgsub_guarded</td><td>5</td><td>glue strategy (night&nbsp;/&nbsp;day)</td></tr>
+<tr><td><code>day_glue_min_r2</code></td><td>0.85</td><td>5</td><td>daytime glue quality guard</td></tr>
+<tr><td><code>energy_mj</code></td><td>25.0</td><td>9</td><td>laser pulse energy</td></tr>
+<tr><td><code>overlap_O_min</code></td><td>0.1</td><td>8</td><td>min trusted overlap</td></tr>
+<tr><td><code>snr_gate</code> / <code>snr_min</code></td><td>False / 3.0</td><td>11, 12</td><td>trusted-range gating</td></tr>
+<tr><td><code>cal_rmin_m</code> / <code>cal_rmax_m</code></td><td>4500 / 5500 m</td><td>depol</td><td>clean-air calibration window</td></tr>
+<tr><td><code>delta_mol</code></td><td>0.0044</td><td>depol</td><td>molecular depolarization (532 nm)</td></tr>
+</table>
+
+<h3>C &middot; QC outputs</h3>
+<p>The per-day batch writes an Excel workbook (tag <code>v9_2_reference_glue</code>) with sheets:
+<b>NRB profile</b> (interpolated onto a common range grid), <b>SNR</b>, <b>QC_params</b> (per-profile
+glue diagnostics &mdash; <code>slope</code>, <code>offset</code>, <code>fit_quality_r2</code>,
+<code>blend_r1/r2_used_m</code>, <code>glue_mode</code>, <code>day_night_glue_pick</code>), and
+<b>Parameters</b> (the full config used). The depol workbook mirrors these with <code>par_</code>/
+<code>perp_</code> prefixes plus a <b>QC_calibration</b> sheet.</p>
+</section>
+
+<p class="foot">
+Source of record: <code>nrb_engine.py</code> (Steps 1&ndash;12) and <code>depol_engine.py</code> (VDR),
+NARIT TR40 LiDAR Analysis Suite. Equations above are transcribed directly from the implementation;
+function names and defaults are current as of this build. On-demand retrieval (Klett&ndash;Fernald
+inversion, Rayleigh model, analytical overlap, PBL/ALT detection, MPL/AERONET ingest) is documented
+separately in its respective engine.
+</p>
+
+</div>
+</body>
+</html>

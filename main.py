@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple, Callable
 
 import numpy as np
 import pandas as pd
+import mpl_reader   # Mini-MPL readers (CSV + .nc); xarray imported lazily inside
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -159,6 +160,11 @@ def _s1_parse_ts(name: str) -> Optional[pd.Timestamp]:
 
 
 def _s1_read_pbl_km(path: Path) -> float:
+    if mpl_reader.is_nc_path(path):
+        try:
+            return mpl_reader.read_pbl_km_nc(path)
+        except Exception:
+            return float("nan")
     try:
         dfh = pd.read_csv(path, sep=None, engine="python")
         for c in dfh.columns:
@@ -191,6 +197,8 @@ def _s1_read_pbl_km(path: Path) -> float:
 
 
 def _s1_read_copol(path: Path, row_start=0, row_end=498):
+    if mpl_reader.is_nc_path(path):
+        return mpl_reader.read_copol_nc(path, row_start, row_end)
     try:
         dfh = pd.read_csv(path, sep=None, engine="python")
         if "range_nrb" in dfh.columns and "copol_nrb" in dfh.columns:
@@ -214,10 +222,13 @@ def _s1_collect_actual_files(folder: Path, date_text: str, start_time_text: str)
         ts = _s1_parse_ts(f.name)
         if ts is None:
             continue
+        # .nc timestamps are UTC → shift to local (UTC+7) so MPL lines up with TR40.
+        if mpl_reader.is_nc_path(f):
+            ts = ts + pd.Timedelta(hours=mpl_reader.NC_TZ_SHIFT_HOURS)
         if ts not in mapping:
             mapping[ts] = f
     if not mapping:
-        raise ValueError("No MPL CSV files with YYYYMMDDHHMM timestamp found.")
+        raise ValueError("No MPL CSV/.nc files with YYYYMMDDHHMM timestamp found.")
 
     if str(date_text).strip():
         target_date = pd.to_datetime(date_text, errors="raise").normalize()
@@ -1514,7 +1525,7 @@ class Step4Frame(tk.Frame):
         self.alt_ymax_var = tk.StringVar(value="4000"); self.alt_ytick_var = tk.StringVar(value="500")
         self.log_nrb_axis_var = tk.BooleanVar(value=False); self.log_base_var = tk.StringVar(value="10")
         self.title_rti_proto_var = tk.StringVar(value="LiDAR Prototype"); self.title_rti_mpl_var = tk.StringVar(value="Mini MPL")
-        self.title_prof_var = tk.StringVar(value="Prototype NRB vs MPL copol NRB")
+        self.title_prof_var = tk.StringVar(value="Prototype NRB vs MPL parallel NRB")
         self.title_altcmp_var = tk.StringVar(value="MPL ALT vs Prototype ALT")
         self.rti_xlabel_var = tk.StringVar(value="Time (HH:MM)"); self.rti_ylabel_var = tk.StringVar(value="Range (m)")
         self.prof_xlabel_var = tk.StringVar(value="Range (m)"); self.prof_ylabel_var = tk.StringVar(value="NRB")
@@ -2170,7 +2181,7 @@ class Step4Frame(tk.Frame):
 # ═════════════════════════════════════════════════════════════════════════════
 class PipelineTab(tk.Frame):
     STEPS = [
-        ("1", "MPL → rmin-rmax", "CSV folder  →  Excel with rmin/rmax/copol"),
+        ("1", "MPL → rmin-rmax", "CSV folder  →  Excel with rmin/rmax/parallel"),
         ("2", "NRB Daily Profile", ".dat folder  →  NRB profile Excel"),
         ("3", "ALT Calculator",   "NRB profile / MPL-guided rmin-rmax  →  ALT results Excel"),
         ("4", "RTI Visualizer",   "All outputs  →  RTI + profile plots"),

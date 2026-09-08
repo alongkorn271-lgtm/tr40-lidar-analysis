@@ -1,0 +1,16 @@
+# Runtime dependencies for the TR40 LiDAR Analysis Suite
+#
+# Install with:   pip install -r requirements.txt
+# Python:         3.10 or newer recommended
+
+numpy>=1.24
+pandas>=2.0
+openpyxl>=3.1          # Excel I/O backend used by pandas
+matplotlib>=3.7
+
+# Web front-end (Streamlit Cloud / local)
+streamlit>=1.36
+
+# NOTE: customtkinter (desktop main_v2.py only) is intentionally NOT listed —
+# it pulls in Tcl/Tk which Streamlit Cloud's Linux Python lacks. For local
+# desktop use, install separately:   pip install customtkinter

@@ -179,6 +179,61 @@ def detect_cloud_in_window(
     return True
 
 
+def nrb_cloud_cap_base(
+    r_m,
+    nrb,
+    rmin: float,
+    rmax: float,
+    threshold: float,
+    surface_gap_m: float = 150.0,
+) -> Optional[float]:
+    """Base range (m) of the lowest ELEVATED cloud in [rmin, rmax], else None.
+
+    NRB-magnitude cloud guard for the ALT search. A cloud (water OR ice) is a
+    contiguous region where normalized NRB exceeds `threshold` whose base is
+    NOT surface-attached. Unlike a fixed `surface_bl_max_m`, "surface-attached"
+    is defined relative to the search start (base within `surface_gap_m` of
+    rmin), so a DEEP boundary layer — high NRB rising straight from the surface,
+    however thick — is treated as the BL and NOT capped. Only a separated,
+    elevated high-NRB layer (the classic cloud signature, including low-δ water
+    clouds that the δ ice-screen misses) returns a cap height.
+
+    Caller caps the ALT search rmax below this base so ALT = aerosol top below
+    the cloud (instead of skipping the profile or grabbing the cloud edge).
+    """
+    if threshold is None or float(threshold) <= 0:
+        return None
+    r = np.asarray(r_m, dtype=float)
+    y = np.asarray(nrb, dtype=float)
+    mask = (r >= float(rmin)) & (r <= float(rmax)) & np.isfinite(y)
+    if not np.any(mask):
+        return None
+
+    # Boxcar-3 smooth (mirror detect_cloud_layers) to suppress single-bin spikes.
+    y_in = np.where(mask, y, np.nan)
+    kernel = np.ones(3, dtype=float) / 3.0
+    finite = np.isfinite(y_in)
+    y_filled = np.where(finite, y_in, 0.0)
+    norm = np.convolve(finite.astype(float), kernel, mode="same")
+    y_smooth = np.where(norm > 0,
+                        np.convolve(y_filled, kernel, mode="same") / np.maximum(norm, 1e-9),
+                        np.nan)
+
+    above = (y_smooth >= float(threshold)) & mask
+    if not np.any(above):
+        return None
+    breaks = np.where(np.diff(above.astype(int)) != 0)[0] + 1
+    chunks = [c for c in np.split(np.arange(len(above)), breaks)
+              if c.size and bool(above[c[0]])]
+    # chunks are in ascending range order; return the first ELEVATED one.
+    for chunk in chunks:
+        base_m = float(r[int(chunk[0])])
+        if base_m <= float(rmin) + float(surface_gap_m):
+            continue  # surface-attached boundary layer, not a cloud
+        return base_m
+    return None
+
+
 def select_lowest_stable_edge(
     W,
     r_use,
@@ -825,6 +880,100 @@ def _valid_window(rmin: float, rmax: float) -> bool:
     return np.isfinite(rmin) and np.isfinite(rmax) and float(rmax) > float(rmin)
 
 
+# -----------------------------------------------------------------------------
+# Depolarization support (Track 2) — optional aid to ALT detection
+# -----------------------------------------------------------------------------
+def load_depol_profiles(path: Path, sheet: str = "Depol_delta_v"):
+    """Read a depol workbook -> (range_grid, {slot_HHMM: delta_v array})."""
+    df = pd.read_excel(path, sheet_name=sheet)
+    r = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(float)
+    out: Dict[str, np.ndarray] = {}
+    for c in df.columns[1:]:
+        ts = pd.to_datetime(c, errors="coerce")
+        slot = ts.strftime("%H:%M") if pd.notna(ts) else str(c)
+        out[slot] = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+    return r, out
+
+
+def load_snr_profiles(path: Path, sheet: str = "SNR"):
+    """Read an SNR sheet (Range(m) + timestamp columns) from the NRB/depol
+    workbook -> (range_grid, {slot_HHMM: snr array}). Same wide layout as the
+    NRB profile, so the columns line up slot-for-slot."""
+    df = pd.read_excel(path, sheet_name=sheet)
+    r = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(float)
+    out: Dict[str, np.ndarray] = {}
+    for c in df.columns[1:]:
+        ts = pd.to_datetime(c, errors="coerce")
+        slot = ts.strftime("%H:%M") if pd.notna(ts) else str(c)
+        out[slot] = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+    return r, out
+
+
+def snr_trusted_top_m(r_m, snr, snr_min=3.0, smooth_bins=15):
+    """Contiguous SNR-trusted-range top [m] from a SMOOTHED SNR profile (rolling
+    median): walk UP from the peak-SNR bin until the smoothed SNR drops below
+    snr_min. Mirrors nrb_engine.snr_trusted_top so the ALT cap matches the gate.
+    Smoothing ignores the ~25% of daytime noise bins that randomly exceed 3σ."""
+    r = np.asarray(r_m, float)
+    s = np.asarray(snr, float)
+    valid = np.isfinite(s) & np.isfinite(r)
+    if not valid.any():
+        return np.nan
+    sm = pd.Series(np.where(valid, s, np.nan)).rolling(
+        max(1, int(smooth_bins)), center=True,
+        min_periods=max(3, int(smooth_bins) // 2)).median().to_numpy()
+    ok = np.isfinite(sm) & (sm >= float(snr_min))
+    if not ok.any():
+        return np.nan
+    core = int(np.nanargmax(np.where(np.isfinite(sm), sm, -np.inf)))
+    if not ok[core]:
+        return np.nan
+    top = float(r[core])
+    for i in range(core, len(r)):
+        if not ok[i]:
+            break
+        top = float(r[i])
+    return top
+
+
+def depol_ice_cloud_base(r_m, delta, rmin, rmax, ice_thr, surface_bl_max_m=800.0):
+    """Lowest range in (rmin,rmax] above the surface BL where delta_v exceeds
+    `ice_thr` (ice cloud / strongly non-spherical). Returns that range or None.
+    Used to cap the ALT search window below an overlying cloud."""
+    r = np.asarray(r_m, float)
+    d = np.asarray(delta, float)
+    m = (r >= float(rmin)) & (r <= float(rmax)) & (r > float(surface_bl_max_m)) \
+        & np.isfinite(d) & (d > float(ice_thr))
+    if not np.any(m):
+        return None
+    return float(np.min(r[m]))
+
+
+def compute_depol_alt(r_m, delta, rmin, rmax, fc, order, pad_frac, tol_m):
+    """Independent ALT estimate from the depol profile: the aerosol top is the
+    most-negative HWCT peak of delta_v (delta falls from aerosol value in the
+    BL to molecular above). Returns range [m] or NaN."""
+    prep = prepare_profile_for_fft(r_m, delta)
+    if prep["status"] != "ok" or int(prep["analysis_bins_used"]) < 8:
+        return np.nan
+    r_use = np.asarray(prep["r_use"], float)
+    y_use = np.asarray(prep["y_use"], float)
+    dr = float(np.nanmedian(np.diff(r_use)))
+    if not np.isfinite(dr) or dr <= 0:
+        return np.nan
+    y_dn = fft_lowpass_fixed_fc(y_use, dr=dr, fc=fc, order=order, pad_frac=pad_frac)
+    half = int(max(1, round(float(tol_m) / dr)))
+    W = hwct_haar_step_right_minus_left(y_dn, half)
+    mask = np.isfinite(W) & (r_use >= float(rmin)) & (r_use <= float(rmax))
+    if not np.any(mask):
+        return np.nan
+    W_win = W[mask]
+    r_win = r_use[mask]
+    if not np.any(W_win < 0):
+        return np.nan
+    return float(r_win[int(np.nanargmin(W_win))])
+
+
 def main():
     ap = argparse.ArgumentParser(description="ALT report-style (Excel inputs + multi-sheet outputs).")
     ap.add_argument("--nrb", required=True, help="NRB Excel file path")
@@ -888,6 +1037,36 @@ def main():
                     help="Lower range bound for cloud search (m, default 100)")
     ap.add_argument("--cloud_search_rmax", type=float, default=15000.0,
                     help="Upper range bound for cloud search (m, default 15000)")
+    ap.add_argument("--nrb_cloud_cap", action="store_true",
+                    help="Cap the ALT search below the lowest ELEVATED NRB cloud "
+                         "(catches water + ice clouds; primary cloud guard so ALT "
+                         "is not mistaken for a cloud edge). Uses --cloud_threshold.")
+    ap.add_argument("--nrb_cloud_surface_gap_m", type=float, default=150.0,
+                    help="A high-NRB layer with base within this gap of the search "
+                         "start is the surface BL (any depth), not a cloud (default 150 m)")
+
+    # ── Depolarization aid (Track 2, optional) ──────────────────────────────
+    ap.add_argument("--depol_file", default="",
+                    help="Path to depol workbook (Step 6 output) to aid ALT detection")
+    ap.add_argument("--depol_sheet", default="Depol_delta_v",
+                    help="Sheet with delta_v (Range + per-time columns)")
+    ap.add_argument("--depol_cloud_screen", action="store_true",
+                    help="Cap ALT search below an ice cloud detected from delta_v")
+    ap.add_argument("--depol_ice_thr", type=float, default=0.35,
+                    help="delta_v above this = ice cloud / strongly non-spherical (default 0.35)")
+    ap.add_argument("--depol_confirm", action="store_true",
+                    help="Add an independent delta_v-based ALT and agree/disagree flag")
+    ap.add_argument("--depol_confirm_tol_m", type=float, default=300.0,
+                    help="NRB vs depol ALT agreement tolerance (m, default 300)")
+
+    # ── SNR-trusted-range cap (Track: signal quality) ─────────────────────────
+    ap.add_argument("--snr_cap", action="store_true",
+                    help="Cap the ALT search at the SNR-trusted range top (from the "
+                         "SNR sheet) so the search never enters the noise floor")
+    ap.add_argument("--snr_sheet", default="SNR",
+                    help="SNR sheet name in the NRB workbook (default: SNR)")
+    ap.add_argument("--snr_cap_min", type=float, default=3.0,
+                    help="SNR threshold for the trusted-range top (default 3.0)")
 
     args = ap.parse_args()
 
@@ -911,6 +1090,28 @@ def main():
 
     # Prepare mapping by slot (HH:MM)
     rr_map = df_rr.set_index("Slot") if "Slot" in df_rr.columns else pd.DataFrame().set_index(pd.Index([]))
+
+    # Optional depolarization profiles (Track 2) keyed by HH:MM slot
+    r_delta = None
+    depol_map: Dict[str, np.ndarray] = {}
+    if str(args.depol_file).strip():
+        try:
+            r_delta, depol_map = load_depol_profiles(Path(args.depol_file), args.depol_sheet)
+            print(f"[depol] loaded {len(depol_map)} delta_v profile(s) from {Path(args.depol_file).name}")
+        except Exception as e:
+            print(f"[WARN] could not load depol file: {e}")
+
+    # Optional SNR profiles (signal-quality cap) — read from the SAME NRB workbook,
+    # which carries an "SNR" sheet on the same range grid / slots as the NRB.
+    r_snr = None
+    snr_map: Dict[str, np.ndarray] = {}
+    if args.snr_cap:
+        try:
+            r_snr, snr_map = load_snr_profiles(Path(args.nrb), args.snr_sheet)
+            print(f"[snr] loaded {len(snr_map)} SNR profile(s) from sheet '{args.snr_sheet}'")
+        except Exception as e:
+            print(f"[WARN] could not load SNR sheet '{args.snr_sheet}': {e} — snr_cap disabled")
+            snr_map = {}
 
     # 1) Input_NRB_raw
     df_raw = pd.DataFrame(mat_raw, columns=profile_times)
@@ -993,6 +1194,43 @@ def main():
                 prof_rmin, prof_rmax = pa_rmin, pa_rmax
                 window_source = window_source + "+peak_anchor"
 
+            # ── NRB-magnitude cloud cap (primary cloud guard) — cap search below
+            # ── Signal-quality: cap the search at the SNR-trusted range top ────
+            #    Above it the NRB is noise x R^2, so any "layer" there is spurious.
+            #    Runs FIRST (most fundamental — no valid data above the trusted top).
+            snr_trusted = np.nan
+            if snr_map and r_snr is not None and slot in snr_map:
+                snr_prof = np.interp(r_m, r_snr, snr_map[slot], left=np.nan, right=np.nan)
+                snr_trusted = snr_trusted_top_m(r_m, snr_prof, float(args.snr_cap_min))
+                if (np.isfinite(snr_trusted) and _valid_window(prof_rmin, prof_rmax)
+                        and snr_trusted > prof_rmin):
+                    prof_rmax = min(prof_rmax, snr_trusted)
+                    window_source = window_source + "+snr_cap"
+
+            #    the lowest ELEVATED cloud (water OR ice). Runs before the depol
+            #    ice-screen because rainy-season clouds are low-δ water clouds the
+            #    δ screen misses; NRB magnitude catches both.
+            if args.nrb_cloud_cap and _valid_window(prof_rmin, prof_rmax):
+                cbase = nrb_cloud_cap_base(
+                    r_m, ycol, prof_rmin, prof_rmax,
+                    float(args.cloud_threshold),
+                    surface_gap_m=float(args.nrb_cloud_surface_gap_m))
+                if cbase is not None and cbase > prof_rmin:
+                    prof_rmax = min(prof_rmax, cbase)
+                    window_source = window_source + "+nrb_cloudcap"
+
+            # ── Track 2: depol-based cloud screen — cap search below ice cloud ─
+            delta_prof = None
+            if depol_map and r_delta is not None and slot in depol_map:
+                delta_prof = np.interp(r_m, r_delta, depol_map[slot],
+                                       left=np.nan, right=np.nan)
+                if args.depol_cloud_screen and _valid_window(prof_rmin, prof_rmax):
+                    base = depol_ice_cloud_base(
+                        r_m, delta_prof, prof_rmin, prof_rmax, args.depol_ice_thr)
+                    if base is not None and base > prof_rmin:
+                        prof_rmax = min(prof_rmax, base)
+                        window_source = window_source + "+depol_cloudcap"
+
             cloud_flag = detect_cloud_in_window(
                 r_m, ycol, prof_rmin, prof_rmax, args.cloud_screen_threshold,
             )
@@ -1046,7 +1284,27 @@ def main():
             profile_res["window_source"] = window_source
             profile_res["profile_rmin_used_m"] = float(prof_rmin)
             profile_res["profile_rmax_used_m"] = float(prof_rmax)
+            profile_res["snr_trusted_range_m"] = float(snr_trusted)
             profile_res["cloud_screened"] = bool(cloud_flag)
+
+            # ── Track 2: independent depol ALT + agreement flag ──────────────
+            if (args.depol_confirm and delta_prof is not None
+                    and _valid_window(prof_rmin, prof_rmax)):
+                try:
+                    a_dep = compute_depol_alt(
+                        r_m, delta_prof, prof_rmin, prof_rmax,
+                        args.fc, args.order, args.pad_frac, args.tol_m)
+                    profile_res["ALT_depol_m"] = a_dep
+                    nrb_alt = profile_res.get("PBL_TR40_m", np.nan)
+                    if np.isfinite(a_dep) and np.isfinite(nrb_alt):
+                        profile_res["depol_confirm"] = (
+                            "agree" if abs(a_dep - nrb_alt) <= args.depol_confirm_tol_m
+                            else "disagree")
+                    else:
+                        profile_res["depol_confirm"] = "no_depol_edge"
+                except Exception:
+                    profile_res["ALT_depol_m"] = np.nan
+                    profile_res["depol_confirm"] = "error"
 
         guided_alt = guided_res["PBL_TR40_m"]
         profile_alt = profile_res["PBL_TR40_m"]
@@ -1066,6 +1324,24 @@ def main():
                 selected_res = profile_res
 
         alt_tr40 = selected_res["PBL_TR40_m"]
+
+        # ── δ-at-ALT QC flag: classify the SELECTED (reported) ALT edge as
+        #    cloud / aerosol so a (low-δ) water cloud or (high-δ) ice cloud
+        #    mistaken for the layer top is visible. Computed at alt_tr40 (the
+        #    value actually reported) so the flag always matches ALT_TR40_m.
+        #    Needs a depol file; otherwise left blank.
+        if delta_prof is not None and np.isfinite(alt_tr40):
+            d_at = float(np.interp(alt_tr40, r_m, delta_prof,
+                                   left=np.nan, right=np.nan))
+            profile_res["delta_at_ALT"] = d_at
+            if not np.isfinite(d_at):
+                profile_res["ALT_feature"] = "unknown"
+            elif d_at >= 0.35:
+                profile_res["ALT_feature"] = "cloud_ice"
+            elif d_at >= 0.10:
+                profile_res["ALT_feature"] = "dust_smoke"
+            else:
+                profile_res["ALT_feature"] = "aerosol"
         status = "ok" if np.isfinite(alt_tr40) else selected_res["Analysis_status"].replace("skipped:", "skip_")
         delta_selected = (alt_tr40 - alt_mpl) if (np.isfinite(alt_tr40) and np.isfinite(alt_mpl)) else np.nan
         delta_guided = (guided_alt - alt_mpl) if (np.isfinite(guided_alt) and np.isfinite(alt_mpl)) else np.nan
@@ -1095,6 +1371,10 @@ def main():
                 "ALT_profile_neg_m": profile_res["PBL_neg_m"],
                 "ALT_profile_chosen_mode": profile_res["Chosen_mode"],
                 "ALT_profile_status": profile_res["Analysis_status"],
+                "ALT_depol_m": profile_res.get("ALT_depol_m", np.nan),
+                "depol_confirm": profile_res.get("depol_confirm", "off"),
+                "delta_at_ALT": profile_res.get("delta_at_ALT", np.nan),
+                "ALT_feature": profile_res.get("ALT_feature", ""),
                 "Delta_ALT_selected_minus_MPL_m": delta_selected,
                 "Delta_ALT_guided_minus_MPL_m": delta_guided,
                 "Delta_ALT_profile_minus_MPL_m": delta_profile,

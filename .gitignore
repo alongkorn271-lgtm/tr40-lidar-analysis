@@ -43,7 +43,10 @@ _*.png
 _*.csv
 
 # ─── Large vendor docs / private data ─────────────────────────────────────
-MPL data/*.pdf
+# Vendored Licel library (third-party, has its own git repo) — kept locally only
+Licel_TCPIP_Python/
+# Large input data (AERONET / Mini-MPL raw) — not source code, fetch separately
+MPL data/
 
 # ─── Logs ─────────────────────────────────────────────────────────────────
 *.log

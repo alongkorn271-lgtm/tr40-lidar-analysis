@@ -136,6 +136,6 @@ download outputs (no persistent disk).
 
 ## Roadmap
 
-- [ ] **Track 2 — Cross-polarization** (depolarization ratio δ). Requires hardware installation. Will improve aerosol-type discrimination and ALT detection where the co-pol profile lacks a sharp boundary-layer top.
+- [ ] **Track 2 — Cross-polarization** (depolarization ratio δ). Requires hardware installation. Will improve aerosol-type discrimination and ALT detection where the parallel profile lacks a sharp boundary-layer top.
 - [ ] **Streamlit port** of the GUI for web deployment (engines are already framework-agnostic).
 - [ ] Optional: cloud optical depth / cloud-type product.

@@ -14,8 +14,10 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from main import (  # noqa: E402
-    _s1_collect_actual_files, _s1_read_copol, _s1_read_pbl_km,
+from mpl_reader import (  # noqa: E402
+    collect_actual_files as _s1_collect_actual_files,
+    read_copol as _s1_read_copol,
+    read_pbl_km as _s1_read_pbl_km,
 )
 
 st.set_page_config(page_title="Step 1 · MPL rmin-rmax", page_icon="📁", layout="wide")

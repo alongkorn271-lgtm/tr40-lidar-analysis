@@ -69,7 +69,7 @@ with st.expander("Hardware & science notes", expanded=False):
         - Telescope: Celestron EdgeHD 800 (D = 203 mm, f = 2032 mm)
         - Laser: Quantel VIRON, 532 nm
         - Detector: Licel PM-HV + Hamamatsu R9880U PMT
-        - Geometry: biaxial, d⊥ = 148.12 mm  ·  bin spacing 3.75 m (25 ns)
+        - Geometry: biaxial, d⊥ = 156.0 mm  ·  bin spacing 3.75 m (25 ns)
 
         **NRB definition (SigmaMPL convention):**
         `NRB = (Raw·DT − Afterpulse − BG) / (Overlap · Energy) × R²`, then ÷ max.

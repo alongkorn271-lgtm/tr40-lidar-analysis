@@ -94,15 +94,88 @@ def molecular_extinction(beta_mol: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Mass concentration  (Track 1, item 5)
+# ---------------------------------------------------------------------------
+# Mass extinction efficiency σ_ext [m² g⁻¹] at 532 nm — empirical, particle-type
+# dependent. Values from Reid et al. (2005), Hand & Malm (2007), AERONET
+# inversion products averaged over Southeast Asia smoke / dust events.
+SIGMA_EXT_PRESETS = {
+    "Biomass smoke (Chiang Mai, dry season)": 4.0,
+    "Urban / industrial pollution":           3.5,
+    "Mixed continental (default)":            3.5,
+    "Marine":                                 2.0,
+    "Mineral dust":                           0.8,
+}
+
+
+def compute_mass_concentration(
+    alpha_aer: np.ndarray,
+    sigma_ext_m2_per_g: float,
+) -> np.ndarray:
+    """
+    Convert aerosol extinction profile to mass concentration [µg / m³].
+
+    M(R) = α_aer(R) / σ_ext
+
+    Parameters
+    ----------
+    alpha_aer          : aerosol extinction [m⁻¹] (from Fernald)
+    sigma_ext_m2_per_g : mass extinction efficiency [m² g⁻¹] for the assumed
+                         particle type — see SIGMA_EXT_PRESETS.
+
+    Returns
+    -------
+    mass [µg m⁻³] on the same range grid.
+    """
+    a = np.asarray(alpha_aer, float)
+    sig = float(sigma_ext_m2_per_g)
+    if not np.isfinite(sig) or sig <= 0.0:
+        return np.full_like(a, np.nan)
+    # α[1/m] / σ[m²/g] → mass density in g/m³ → ×1e6 → µg/m³
+    return a / sig * 1.0e6
+
+
+# ---------------------------------------------------------------------------
 # Inversion — Fernald 1984
 # ---------------------------------------------------------------------------
+
+# δ_v → 532 nm aerosol lidar ratio S_a [sr], aligned to depol_engine
+# AEROSOL_TYPE_BANDS. Literature-typical for the NARIT / Chiang Mai regime
+# (biomass smoke + urban haze dominant). NOTE: low δ is type-AMBIGUOUS (marine
+# ~25 vs urban ~60 both low δ) so those bands are best-effort, not a unique
+# inversion. TUNE/validate against MPL `lidar_ratio` + AERONET.
+LIDAR_RATIO_BANDS = [
+    (0.00, 0.05, 55.0),   # spherical urban / hygroscopic haze
+    (0.05, 0.10, 60.0),   # mixed / weakly depolarizing
+    (0.10, 0.20, 65.0),   # aged biomass smoke (high S_a)
+    (0.20, 0.35, 48.0),   # dust / coarse non-spherical (lower S_a)
+    # δ >= 0.35 → ice / cloud (not aerosol) → caller's default_sa
+]
+
+
+def lidar_ratio_from_delta(delta_v, default_sa: float = 50.0, bands=LIDAR_RATIO_BANDS):
+    """Map a δ_v profile to a height-resolved aerosol lidar ratio S_a(R) [sr].
+
+    Each height gets S_a from its δ-classified type band. Where δ is invalid
+    (NaN — e.g. cross SNR too low above ~3 km) or ice/cloud (δ >= 0.35, no band),
+    `default_sa` is used. This REFINES the S_a assumption (height- and type-aware)
+    but does not eliminate it: it is a δ → type → S_a lookup, and low δ is type-
+    ambiguous. Returns a float array the shape of `delta_v`.
+    """
+    d = np.asarray(delta_v, dtype=float)
+    sa = np.full(d.shape, float(default_sa), dtype=float)
+    for lo, hi, val in bands:
+        sa[np.isfinite(d) & (d >= lo) & (d < hi)] = float(val)
+    sa[~np.isfinite(d)] = float(default_sa)
+    return sa
+
 
 def fernald_inversion(
     R_m: np.ndarray,
     S_R: np.ndarray,
     R_ref_m: float,
     beta_mol: np.ndarray,
-    lidar_ratio_aer: float = 50.0,
+    lidar_ratio_aer=50.0,
     lidar_ratio_mol: float = _SA_MOL,
     beta_aer_ref: float = 0.0,
 ) -> np.ndarray:
@@ -115,7 +188,9 @@ def fernald_inversion(
     S_R           : range-corrected signal S(R) = P(R)*R^2 (arbitrary units).
     R_ref_m       : reference range [m] — must be in clean (aerosol-free) air.
     beta_mol      : molecular backscatter [m^-1 sr^-1] on same grid as R_m.
-    lidar_ratio_aer : S_a, aerosol extinction-to-backscatter ratio [sr].
+    lidar_ratio_aer : S_a, aerosol extinction-to-backscatter ratio [sr]. Either a
+                      scalar (constant profile) OR an array of len(R_m) for a
+                      height-resolved S_a(R) (e.g. from lidar_ratio_from_delta).
     lidar_ratio_mol : S_m = 8*pi/3 sr (Rayleigh).
     beta_aer_ref  : assumed beta_aer at R_ref (typically 0).
 
@@ -126,7 +201,9 @@ def fernald_inversion(
     R  = np.asarray(R_m,    float)
     S  = np.asarray(S_R,    float)
     bm = np.asarray(beta_mol, float)
-    Sa, Sm = float(lidar_ratio_aer), float(lidar_ratio_mol)
+    # Broadcast S_a to a per-bin array so the lidar ratio can vary with height.
+    Sa_arr = np.broadcast_to(np.asarray(lidar_ratio_aer, float), R.shape).astype(float)
+    Sm = float(lidar_ratio_mol)
 
     if not (R[0] <= float(R_ref_m) <= R[-1]):
         raise ValueError(
@@ -140,6 +217,7 @@ def fernald_inversion(
     beta_total[i_ref] = float(beta_aer_ref) + float(bm[i_ref])
 
     for i in range(i_ref - 1, -1, -1):
+        Sa    = float(Sa_arr[i])          # local (height-resolved) lidar ratio
         dR    = float(R[i + 1] - R[i])
         A     = (Sa - Sm) * float(bm[i + 1] + bm[i]) * dR
         X_i   = float(S[i])     * np.exp(A)
@@ -217,6 +295,8 @@ def compute_fernald_from_nrb_df(
     method: str = "fernald",
     T_K_scalar: Optional[float] = None,
     P_Pa_scalar: Optional[float] = None,
+    sigma_ext_m2_per_g: Optional[float] = None,
+    df_delta: Optional[pd.DataFrame] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Run Fernald / Klett inversion on every profile column of an NRB DataFrame.
@@ -232,13 +312,18 @@ def compute_fernald_from_nrb_df(
     method          : "fernald" (Fernald 1984, recommended) or "klett".
     T_K_scalar      : Uniform temperature [K] for the entire profile (None = Standard Atm).
     P_Pa_scalar     : Uniform pressure [Pa] (None = Standard Atm).
+    sigma_ext_m2_per_g : if given (>0), also compute mass concentration profile
+                      [µg m⁻³] = α_aer / σ_ext.  See SIGMA_EXT_PRESETS for
+                      typical values per particle type.
 
     Returns
     -------
-    dict with three DataFrames:
+    dict with DataFrames:
       "beta_aer"  : Range(m) + timestamp columns — aerosol backscatter [m^-1 sr^-1]
       "alpha_aer" : Range(m) + timestamp columns — aerosol extinction  [m^-1]
       "AOD"       : 1-row DataFrame — per-timestamp column-integrated AOD
+      "mass_aer"  : (only when sigma_ext_m2_per_g is given) Range(m) +
+                    timestamp columns — aerosol mass concentration [µg m⁻³]
     """
     R = df_nrb["Range(m)"].to_numpy(float)
     ts_cols = [c for c in df_nrb.columns if c != "Range(m)"]
@@ -258,29 +343,69 @@ def compute_fernald_from_nrb_df(
     i_ref_global = int(np.searchsorted(R, float(R_ref_m)))
     beta_mol_ref = float(beta_mol[min(i_ref_global, len(beta_mol) - 1)])
 
+    # Optional δ_v lookup for a height-resolved S_a(R). Columns are matched to the
+    # NRB columns by timestamp name (same when both come from one depol workbook).
+    delta_R = None
+    delta_map: Dict = {}
+    if df_delta is not None and "Range(m)" in getattr(df_delta, "columns", []):
+        delta_R = df_delta["Range(m)"].to_numpy(float)
+        delta_map = {str(c): df_delta[c].to_numpy(float)
+                     for c in df_delta.columns if c != "Range(m)"}
+
     beta_aer_cols:  Dict = {}
     alpha_aer_cols: Dict = {}
     aod_vals:       Dict = {}
+    sa_cols:        Dict = {}   # S_a(R) actually used per column
 
+    ref_snapped = {}   # col -> effective R_ref actually used (when snapped)
     for col in ts_cols:
         S = df_nrb[col].to_numpy(float)
         # Zero-fill non-positive / non-finite bins before inversion
-        S_in = np.where(np.isfinite(S) & (S > 0.0), S, 0.0)
+        valid_S = np.isfinite(S) & (S > 0.0)
+        S_in = np.where(valid_S, S, 0.0)
+        # Effective reference: the SNR gate masks the signal above the trusted
+        # range, so a requested R_ref that lands in that masked/zero region would
+        # make the backward Fernald integration hit beta_total=0 and skip the whole
+        # boundary layer below (AOD collapses to ~0). Snap R_ref DOWN to the highest
+        # bin that still has valid signal ≤ R_ref. Valid (unmasked) cases are
+        # unchanged. If nothing is valid at/below R_ref this column stays NaN.
+        R_ref_eff = float(R_ref_m)
+        i_ref_c = int(np.searchsorted(R, float(R_ref_m)))
+        i_ref_c = min(i_ref_c, len(R) - 1)
+        if not valid_S[i_ref_c]:
+            below = np.where(valid_S[:i_ref_c + 1])[0]
+            if below.size:
+                R_ref_eff = float(R[below[-1]])
+                ref_snapped[col] = R_ref_eff
+            else:
+                beta_aer_cols[col]  = np.full_like(R, np.nan)
+                alpha_aer_cols[col] = np.full_like(R, np.nan)
+                aod_vals[col]       = np.nan
+                sa_cols[col]        = np.broadcast_to(float(lidar_ratio_aer), R.shape).astype(float)
+                continue
+        # S_a: height-resolved from δ when available for this column, else scalar.
+        sa_use = float(lidar_ratio_aer)
+        dcol = delta_map.get(str(col))
+        if dcol is not None:
+            if delta_R is not None and (len(delta_R) != len(R)
+                                        or not np.allclose(delta_R, R, atol=1e-6)):
+                dcol = np.interp(R, delta_R, dcol, left=np.nan, right=np.nan)
+            sa_use = lidar_ratio_from_delta(dcol, default_sa=float(lidar_ratio_aer))
         try:
             if method.lower() == "fernald":
                 ba = fernald_inversion(
-                    R, S_in, R_ref_m, beta_mol,
-                    lidar_ratio_aer=lidar_ratio_aer,
+                    R, S_in, R_ref_eff, beta_mol,
+                    lidar_ratio_aer=sa_use,
                 )
             else:
                 bt = klett_inversion(
-                    R, S_in, R_ref_m,
+                    R, S_in, R_ref_eff,
                     beta_ref=beta_mol_ref,
                 )
                 ba = bt - beta_mol
 
             ba = np.where(np.isfinite(ba), np.maximum(ba, 0.0), np.nan)
-            aa = lidar_ratio_aer * ba
+            aa = sa_use * ba
 
             valid = np.isfinite(aa)
             aod = float(np.trapezoid(np.where(valid, aa, 0.0), R)) if valid.any() else np.nan
@@ -293,6 +418,7 @@ def compute_fernald_from_nrb_df(
         beta_aer_cols[col]  = ba
         alpha_aer_cols[col] = aa
         aod_vals[col]       = aod
+        sa_cols[col]        = np.broadcast_to(sa_use, R.shape).astype(float)
 
     def _frame(cols_dict: Dict) -> pd.DataFrame:
         df = pd.DataFrame({"Range(m)": R})
@@ -305,11 +431,20 @@ def compute_fernald_from_nrb_df(
     df_aod   = pd.DataFrame([{
         "R_ref_m":            R_ref_m,
         "lidar_ratio_aer_sr": lidar_ratio_aer,
+        "S_a_source":         "delta_v" if delta_map else "constant",
         "method":             method,
         **aod_vals,
     }])
 
-    return {"beta_aer": df_beta, "alpha_aer": df_alpha, "AOD": df_aod}
+    out = {"beta_aer": df_beta, "alpha_aer": df_alpha, "AOD": df_aod,
+           "lidar_ratio": _frame(sa_cols)}
+
+    if sigma_ext_m2_per_g is not None and float(sigma_ext_m2_per_g) > 0:
+        mass_cols = {col: compute_mass_concentration(arr, sigma_ext_m2_per_g)
+                     for col, arr in alpha_aer_cols.items()}
+        out["mass_aer"] = _frame(mass_cols)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
