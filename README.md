@@ -2,7 +2,7 @@
 
 Research-grade processing for the **TR40 elastic Mie LiDAR (532 nm)** at NARIT, Chiang Mai, Thailand. A 5-step desktop workflow that turns raw photon-counting / analog `.dat` files into normalized relative backscatter (NRB), aerosol layer top (ALT), range-time-intensity (RTI) imagery, and Fernald/Klett aerosol-property retrievals (β_aer, α_aer, AOD).
 
-![Processing pipeline](LiDAR_pipeline_flowchart.png)
+![Processing pipeline](picture/LiDAR_pipeline_flowchart.png)
 
 ---
 
