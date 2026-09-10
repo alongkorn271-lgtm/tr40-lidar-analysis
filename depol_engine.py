@@ -161,15 +161,28 @@ def _lidar_ts_key(f: Path) -> Tuple[pd.Timestamp, str]:
 
 
 def _glob_lidar_files(folder: Path, pattern: str) -> List[Path]:
-    """Files in ``folder`` matching ``pattern``; when the pattern matches nothing
-    (e.g. the default ``*.dat`` against a folder of extensionless raw files) fall
-    back to every file that sniffs as a Licel raw binary. This keeps existing
-    ``.dat`` folders byte-for-byte unchanged while letting raw folders load."""
+    """List the lidar data files in ``folder``. Licel raw acquisition files
+    (recognised by their name, ``a<yy><M><dd><HH>.<MMSSms>``) take priority — so a
+    stray ``temp.dat`` does not shadow a folder of raw files. Only when there are
+    no Licel-named raw files do we fall back to ``pattern`` (ASCII ``.dat``
+    workflow), then to any file that sniffs as a Licel binary."""
     folder = Path(folder)
+    all_files = [f for f in folder.iterdir() if f.is_file()]
+    licel_raw = sorted(f for f in all_files if _parse_licel_raw_name(f.name) is not None)
+    if licel_raw:
+        return licel_raw
     matched = sorted(folder.glob(pattern))
     if matched:
         return matched
-    return [f for f in sorted(folder.iterdir()) if f.is_file() and _looks_like_licel_binary(f)]
+    binary = [f for f in sorted(all_files) if _looks_like_licel_binary(f)]
+    if binary:
+        return binary
+    # Nothing at the top level: descend into nested subfolders (a zip often
+    # extracts to <date>/<date>/... ) and collect Licel-named raw files anywhere
+    # below — their names are unambiguous, so this cannot pick up junk.
+    nested = sorted(f for f in folder.rglob("*")
+                    if f.is_file() and _parse_licel_raw_name(f.name) is not None)
+    return nested
 
 
 def pair_co_cross_files(

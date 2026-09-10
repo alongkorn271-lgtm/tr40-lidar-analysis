@@ -271,6 +271,56 @@ def scale_stderr(sqd_bin: np.ndarray, meta_signal: DatasetMeta, unit_scale: floa
     return sqd_bin / divider * unit_scale
 
 
+# How to treat the hardware photon StErr. See docs/licel_stderr_limitation.md.
+#   "auto"   - replace it with the Poisson shot-noise estimate ONLY when the
+#              squared data is detectably corrupt (32-bit overflow at high
+#              shots). Low-shot / 3.75 m files keep their valid hardware value.
+#   "off"    - never replace: always report exactly what the file contains
+#              (what the Advanced Viewer shows, corrupt values included).
+#   "always" - always use the Poisson estimate, corrupt or not.
+# Module-level default; override per call via the ``poisson_stderr`` argument.
+POISSON_STDERR_MODE = "auto"
+
+_POISSON_MODES = ("auto", "off", "always")
+
+
+def set_poisson_stderr_mode(mode: str) -> None:
+    """Set the module-wide default photon-StErr policy ('auto'/'off'/'always')."""
+    global POISSON_STDERR_MODE
+    m = str(mode).strip().lower()
+    if m not in _POISSON_MODES:
+        raise ValueError(f"poisson_stderr must be one of {_POISSON_MODES}, got {mode!r}")
+    POISSON_STDERR_MODE = m
+
+
+def get_poisson_stderr_mode() -> str:
+    """Current module-wide photon-StErr policy."""
+    return POISSON_STDERR_MODE
+
+
+def _resolve_poisson_mode(mode: Optional[str]) -> str:
+    """Per-call override -> validated mode string (None = module default)."""
+    if mode is None:
+        return POISSON_STDERR_MODE
+    m = str(mode).strip().lower()
+    if m not in _POISSON_MODES:
+        raise ValueError(f"poisson_stderr must be one of {_POISSON_MODES}, got {mode!r}")
+    return m
+
+
+def poisson_photon_stderr(accumulated_counts: np.ndarray, shots: int,
+                          unit_scale: float) -> np.ndarray:
+    """Shot-noise standard error of the mean photon rate, in signal units.
+
+    The accumulated count c = sum(x) over N shots is Poisson (var ~= c), so the
+    standard error of the mean rate is  sqrt(c) / N * unit_scale. This needs only
+    the (always-valid) accumulated counts, so it recovers a physically correct
+    photon StErr when the hardware squared data is unusable."""
+    n = int(shots) if int(shots) > 0 else 1
+    acc = np.clip(np.asarray(accumulated_counts, float), 0.0, None)
+    return np.sqrt(acc) / n * unit_scale
+
+
 # -----------------------------------------------------------------------------
 # High-level: raw file -> the same ASCII-style column array / DataFrame
 # -----------------------------------------------------------------------------
@@ -296,7 +346,8 @@ def _find_channel_devices(rf: LicelRawFile) -> Dict[int, Dict[str, str]]:
     return groups
 
 
-def raw_file_to_array(rf: LicelRawFile) -> np.ndarray:
+def raw_file_to_array(rf: LicelRawFile, *,
+                      poisson_stderr: Optional[str] = None) -> np.ndarray:
     """Build the (bins, 9) array matching the Advanced Viewer ASCII layout:
 
         col 0-3 : analog_par, analog_stderr_par, photon_par, photon_stderr_par
@@ -306,7 +357,11 @@ def raw_file_to_array(rf: LicelRawFile) -> np.ndarray:
     TR0 is taken as parallel, TR1 as cross (project convention). Std-error
     columns are zero-padded to the full bin count. An overflow dataset, if
     present, fills col 8; otherwise col 8 is zeros.
+
+    ``poisson_stderr`` overrides :data:`POISSON_STDERR_MODE` for this call
+    ('auto' / 'off' / 'always'); None uses the module default.
     """
+    pois_mode = _resolve_poisson_mode(poisson_stderr)
     meta_by_dev = {m.device: m for m in rf.datasets}
     groups = _find_channel_devices(rf)
     tr_indices = sorted(groups.keys())
@@ -330,13 +385,38 @@ def raw_file_to_array(rf: LicelRawFile) -> np.ndarray:
 
     def _col_stderr(sq_dev: Optional[str], sig_dev: Optional[str], kind: str) -> np.ndarray:
         out = np.zeros(nbins)
-        if sq_dev is None or sig_dev is None:
+        if sig_dev is None:
             return out
         sig_meta = meta_by_dev[sig_dev]
         scale = (_analog_scale_mv_per_count(sig_meta) if kind == "analog"
                  else _PHOTON_RANGE_CONST / sig_meta.binwidth_m)
-        vals = scale_stderr(rf.raw[sq_dev], sig_meta, scale)
-        out[:vals.size] = vals[:nbins]
+        if sq_dev is not None:
+            vals = scale_stderr(rf.raw[sq_dev], sig_meta, scale)
+            out[:vals.size] = vals[:nbins]
+
+        # Poisson shot-noise fallback for the PHOTON channel when the hardware
+        # squared data is unusable. At high shot counts the squared sum overflows
+        # 32-bit inside the acquisition (N*sum(x^2) exceeds 2^32), so the derived
+        # standard error comes out garbage (>> the signal itself). The photon
+        # SIGNAL (a linear sum) is unaffected, so we recover a valid stderr from
+        # the shot-noise model  sigma_mu = sqrt(N_counts) / shots * scale.
+        # 3.75 m / low-shot files keep their (valid) hardware stderr unchanged.
+        if kind == "photon" and pois_mode != "off":
+            acc = rf.raw[sig_dev].astype(float)
+            n = sig_meta.shots if sig_meta.shots > 0 else 1
+            sig = acc / n * scale
+            peak = float(np.nanmax(sig)) if np.any(np.isfinite(sig)) else 0.0
+            strong = sig > 0.5 * peak if peak > 0 else np.zeros(sig.size, bool)
+            # A physically valid stderr is always << signal at strong-signal bins;
+            # stderr >= signal there means the squared data is corrupt.
+            broken = (pois_mode == "always") or (sq_dev is None) or (
+                strong.any()
+                and np.nanmedian(out[:sig.size][strong]
+                                 / np.maximum(sig[strong], 1e-9)) > 1.0)
+            if broken:
+                pois = poisson_photon_stderr(acc, sig_meta.shots, scale)
+                out = np.zeros(nbins)
+                out[:pois.size] = pois[:nbins]
         return out
 
     cols = [np.zeros(nbins) for _ in range(9)]
@@ -362,9 +442,10 @@ def raw_file_to_array(rf: LicelRawFile) -> np.ndarray:
     return np.column_stack(cols)
 
 
-def read_licel_raw_array(path: str | Path) -> np.ndarray:
+def read_licel_raw_array(path: str | Path, *,
+                         poisson_stderr: Optional[str] = None) -> np.ndarray:
     """Convenience: decode a raw file straight to the (bins, 9) column array."""
-    return raw_file_to_array(parse_raw_file(path))
+    return raw_file_to_array(parse_raw_file(path), poisson_stderr=poisson_stderr)
 
 
 def read_licel_raw_dataframe(
@@ -373,10 +454,11 @@ def read_licel_raw_dataframe(
     dr_m: float = 3.75,
     channel: str = "parallel",
     first_signal_range_m: float = 3.75,
+    poisson_stderr: Optional[str] = None,
 ) -> pd.DataFrame:
     """Decode a raw file to a DataFrame matching ``read_tr40_dat_ascii``'s output
     (plus an ``overflow`` column) for the requested polarization channel."""
-    arr = read_licel_raw_array(path)
+    arr = read_licel_raw_array(path, poisson_stderr=poisson_stderr)
     ch = str(channel).strip().lower()
     if ch in ("perpendicular", "perp", "cross", "s", "l"):
         c0 = 4
@@ -404,7 +486,10 @@ def read_licel_raw_dataframe(
 # -----------------------------------------------------------------------------
 
 def _compare_to_ascii(raw_path: Path, ascii_path: Path) -> None:
-    arr = read_licel_raw_array(raw_path)
+    # Validate against what Licel actually wrote -> the Poisson repair must be
+    # OFF here, otherwise a corrupt-StErr file would "fail" a comparison it is
+    # in fact reproducing exactly.
+    arr = read_licel_raw_array(raw_path, poisson_stderr="off")
     nbins = arr.shape[0]
     rows = []
     for line in ascii_path.read_text(errors="replace").splitlines():
@@ -438,7 +523,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Decode a Licel raw binary file.")
     ap.add_argument("raw", help="path to a raw file (e.g. a2682711.150166)")
     ap.add_argument("--ascii", help="optional ASCII .dat export to validate against")
+    ap.add_argument("--poisson", choices=_POISSON_MODES, default=POISSON_STDERR_MODE,
+                    help="photon StErr policy: auto (repair only when corrupt, "
+                         "default), off (raw hardware value), always")
     args = ap.parse_args()
+    set_poisson_stderr_mode(args.poisson)
 
     rf = parse_raw_file(args.raw)
     print(f"file      : {rf.filename}")

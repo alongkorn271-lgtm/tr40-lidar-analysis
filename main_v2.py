@@ -72,10 +72,15 @@ try:
         build_single_profile,
         build_daily_profile_from_folder as nrb_build_daily_profile_from_folder,
         collect_actual_timestamps as nrb_collect_actual_timestamps,
+        detect_acquisition_layout as nrb_detect_acquisition_layout,
+        set_poisson_stderr_mode as _nrb_set_poisson_stderr_mode,
     )
     _HAS_NRB = True
 except ImportError:
     _HAS_NRB = False
+
+    def _nrb_set_poisson_stderr_mode(mode: str) -> None:  # no-op fallback
+        pass
 
 # Overlap module (Step 2 — overlap correction)
 try:
@@ -6764,6 +6769,12 @@ class Step6Page(ctk.CTkFrame):
         self.cal_rmax_m   = tk.DoubleVar(value=5500.0)
         self.snr_min      = tk.DoubleVar(value=3.0)   # mask δ where cross SNR below this
         self.snr_gate     = tk.BooleanVar(value=True)   # gate NRB co/cross by SNR (default ON)
+        # Repair the photon StErr when the recorder's squared data is corrupt
+        # (32-bit overflow at high shots x high count rates — the 30 m / 300 s
+        # case). Default ON: it is a no-op on files whose hardware StErr is
+        # valid, and the only way to get a usable SNR on the affected ones.
+        # Untick to see exactly what the Advanced Viewer shows, corruption included.
+        self.poisson_stderr = tk.BooleanVar(value=True)
         # Corrections (so per-channel NRB is fully comparable to MPL / Step 2)
         self.energy_mj    = tk.DoubleVar(value=25.0)
         # Overlap ON by default (analytical NARIT geometry), matching the NRB page.
@@ -7164,6 +7175,20 @@ class Step6Page(ctk.CTkFrame):
             row=0, column=2, sticky="w", padx=(8, 0))
         cb(f, "Normalise NRB co/cross in the lower troposphere (BL → 1.0, full curve, no cut)",
            self.snr_gate, row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        cb(f, "Repair corrupt photon StErr with the Poisson shot-noise estimate "
+              "(raw binary; needed at 30 m)",
+           self.poisson_stderr, row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ctk.CTkLabel(
+            f,
+            text="At high shots × high count rates the recorder's squared sum overflows 32-bit, "
+                 "so the photon StErr it writes is garbage (≈36 618 MHz at 30 m / 300 s) and the "
+                 "SNR gate then throws away good profiles. Ticked, the StErr is rebuilt from "
+                 "√counts⁄shots — only on files where it is detectably broken, so 3.75 m files are "
+                 "untouched. Untick to reproduce the Advanced Viewer exactly. "
+                 "See docs/licel_stderr_limitation.md.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED,
+            justify="left", wraplength=760,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         # ── 6. Depolarization calibration (last: needs the finished NRB) ───
         sub("6 · Depolarization calibration")
@@ -7199,15 +7224,19 @@ class Step6Page(ctk.CTkFrame):
 
     def apply_preset(self, name: str):
         """Raw-layout presets — mirrors Step 2 so a no-pretrigger acquisition can
-        be tried without hand-editing every field."""
+        be tried without hand-editing every field. The Licel pretrigger length is
+        computed from the CURRENT bin width (1/16 of the trace = ~3840 m fixed),
+        so it adapts to any range resolution (1024 bins @3.75 m, 128 @30 m)."""
+        bw = float(self.bin_spacing_m.get()) or 3.75
         if name == "Licel pretrigger 1024":
-            self.bg_mode.set("pretrigger"); self.pretrigger_bins.set(1024)
-            self.first_signal_bin.set(1025); self.first_signal_range_m.set(3.75)
-            self.pretrigger_trim_bins.set(24)
-            self.bg_start_m.set(0.0); self.bg_end_m.set(3750.0)
+            pre = int(round(3840.0 / bw))
+            self.bg_mode.set("pretrigger"); self.pretrigger_bins.set(pre)
+            self.first_signal_bin.set(pre + 1); self.first_signal_range_m.set(bw)
+            self.pretrigger_trim_bins.set(max(1, int(round(24 * 3.75 / bw))))
+            self.bg_start_m.set(0.0); self.bg_end_m.set(pre * bw)
         elif name == "Legacy no pretrigger":
             self.bg_mode.set("fixed"); self.pretrigger_bins.set(0)
-            self.first_signal_bin.set(1); self.first_signal_range_m.set(3.75)
+            self.first_signal_bin.set(1); self.first_signal_range_m.set(bw)
             self.pretrigger_trim_bins.set(0)
             self.bg_start_m.set(13000.0); self.bg_end_m.set(14500.0)
         else:
@@ -7217,13 +7246,16 @@ class Step6Page(ctk.CTkFrame):
         self.day_min_toggle_rate.set(75.0); self.day_max_toggle_rate.set(130.0)
         self.toggle_bg_switch_threshold_mhz.set(10.0)
         self.sig_start_m.set(0.0); self.sig_end_m.set(15000.0)
-        self.bin_spacing_m.set(3.75); self.dead_time_ns.set(3.06)
+        self.dead_time_ns.set(3.06)
         self.preset_name.set(name)
-        self._log(f"Preset applied: {name}")
+        self._log(f"Preset applied: {name} (bin={bw:g} m, pretrigger="
+                  f"{int(self.pretrigger_bins.get())} bins)")
 
     def auto_detect_bins(self):
-        """Pick the preset from the first input file's bin count
-        (>=5024 → 1024 pretrigger + 4000 signal; otherwise no pretrigger)."""
+        """Auto-detect the raw layout from the first input file: reads the bin
+        width (any range resolution), computes the Licel pretrigger length
+        (1/16 of the trace = 1024 bins @3.75 m, 128 @30 m), and detects whether a
+        pretrigger was used from the near-field peak position."""
         src = (self.co_folder.get().strip() or self.cross_folder.get().strip())
         if not src or not os.path.exists(src):
             messagebox.showerror("Error", "Choose a parallel/perpendicular input first.")
@@ -7234,9 +7266,27 @@ class Step6Page(ctk.CTkFrame):
             messagebox.showerror("Error", "No .dat or raw files found in the input.")
             return
         try:
-            bins = int(_read_tr40_dat_ascii_array(files[0]).shape[0])
-            self._log(f"Auto detect: {files[0].name} -> {bins} bins")
-            self.apply_preset("Licel pretrigger 1024" if bins >= 5024
+            # Vote over up to 5 files so a single anomalous acquisition (e.g. a
+            # near-field electronic spike) does not flip the pretrigger decision.
+            sample = files[: min(5, len(files))]
+            infos = []
+            for f in sample:
+                try:
+                    infos.append(nrb_detect_acquisition_layout(f))
+                except Exception:
+                    continue
+            if not infos:
+                raise ValueError("could not read any input file for layout detection.")
+            bws = [i["bin_width_m"] for i in infos]
+            bw = float(sorted(bws)[len(bws) // 2])          # median bin width
+            votes = sum(1 for i in infos if i["has_pretrigger"])
+            has_pre = votes >= (len(infos) - votes)          # majority (ties → yes)
+            total = int(sorted(i["total_bins"] for i in infos)[len(infos) // 2])
+            self.bin_spacing_m.set(bw)   # so apply_preset computes the right count
+            self._log(f"Auto detect ({len(infos)} files): {total} bins, bin={bw:g} m, "
+                      f"pretrigger={'yes' if has_pre else 'no'} "
+                      f"[{votes}/{len(infos)} votes] -> {int(round(3840.0/bw)) if has_pre else 0} bins")
+            self.apply_preset("Licel pretrigger 1024" if has_pre
                               else "Legacy no pretrigger")
         except Exception as e:
             messagebox.showerror("Auto detect failed", str(e))
@@ -7532,6 +7582,9 @@ class Step6Page(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return
 
+        # Raw-binary photon-StErr policy (tk var read on the UI thread).
+        poisson_mode = "auto" if bool(self.poisson_stderr.get()) else "off"
+
         self.run_btn.configure(state="disabled")
         self.progress.set(0.0); self.pb.set(0.0)
         self.status.set("Running…", "running")
@@ -7545,6 +7598,17 @@ class Step6Page(ctk.CTkFrame):
 
         def worker():
             try:
+                # Photon-StErr policy for every raw binary read in this run.
+                try:
+                    _nrb_set_poisson_stderr_mode(poisson_mode)
+                    self._safe(self._log,
+                               "Photon StErr: Poisson repair "
+                               + ("ON (applied only where the hardware value is corrupt)"
+                                  if poisson_mode == "auto"
+                                  else "OFF (raw hardware value as-is)"))
+                except Exception as pe:
+                    self._safe(self._log, f"[WARN] photon StErr mode: {pe}")
+
                 # Build O(R) + A(R) once from the first pair's range axis
                 # (same instrument → same grid for every profile).
                 ov_arr = ap_co_arr = ap_cr_arr = None

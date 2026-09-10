@@ -196,18 +196,129 @@ def parse_licel_raw_timestamp(name: str) -> "Optional[pd.Timestamp]":
 
 
 def glob_lidar_files(folder: Path, pattern: str, *, recursive: bool = False) -> List[Path]:
-    """Files matching ``pattern``; when the pattern matches nothing (e.g. the
-    default ``*.dat`` against a folder of extensionless raw files) fall back to
-    every file that sniffs as a Licel raw binary. ``.dat`` folders are unchanged."""
+    """List the lidar data files in ``folder``.
+
+    Licel raw acquisition files (recognised by their name,
+    ``a<yy><M><dd><HH>.<MMSSms>``) take priority — so a stray ``temp.dat`` in a
+    folder of raw files does not shadow them. Only when there are no Licel-named
+    raw files do we fall back to the ``pattern`` (the ASCII ``.dat`` workflow),
+    and finally to any file that sniffs as a Licel binary."""
     folder = Path(folder)
+    all_files = [f for f in (folder.rglob("*") if recursive else folder.iterdir())
+                 if f.is_file()]
+    licel_raw = sorted(f for f in all_files
+                       if parse_licel_raw_timestamp(f.name) is not None)
+    if licel_raw:
+        return licel_raw
     matched = sorted(folder.rglob(pattern) if recursive else folder.glob(pattern))
     if matched:
         return matched
-    it = folder.rglob("*") if recursive else folder.iterdir()
-    return [f for f in sorted(it) if f.is_file() and _looks_like_licel_binary(f)]
+    binary = [f for f in sorted(all_files) if _looks_like_licel_binary(f)]
+    if binary:
+        return binary
+    # Nothing at the top level: descend into nested subfolders (a zip often
+    # extracts to <date>/<date>/...) and collect Licel-named raw files below.
+    return sorted(f for f in folder.rglob("*")
+                  if f.is_file() and parse_licel_raw_timestamp(f.name) is not None)
 
 
-def _read_licel_binary_array(path: Path) -> np.ndarray:
+# Licel pretrigger = 1/16 of the hardware trace. For the TR40-16bit-3U (16k FIFO)
+# that is 1024 native bins at the 3.75 m base resolution = a FIXED ~3840 m window.
+# At a coarser resolution (FreqDivider) the distance is unchanged, so the bin COUNT
+# scales: pretrigger_bins = round(3840 / bin_width) → 1024 @3.75 m, 128 @30 m.
+PRETRIGGER_TRACE_DISTANCE_M = 3840.0
+
+
+def read_bin_width_m(path: Path) -> float:
+    """Range resolution (bin width) in metres from a raw or ASCII TR file's
+    dataset descriptor. Defaults to 3.75 m if it cannot be determined."""
+    path = Path(path)
+    if _looks_like_licel_binary(path):
+        import licel_binary_reader as _lbr
+        try:
+            ds = _lbr.parse_raw_file(path).datasets
+            if ds:
+                return float(ds[0].binwidth_m)
+        except Exception:
+            return 3.75
+        return 3.75
+    # ASCII export: token 6 of the first "BT/BC/..." descriptor line is the bin width.
+    for line in path.read_text(errors="replace").splitlines():
+        toks = line.split()
+        if (len(toks) >= 16 and toks[0] == "1"
+                and toks[-1][:2] in ("BT", "BC", "S2", "OF")):
+            try:
+                return float(toks[6])
+            except ValueError:
+                continue
+    return 3.75
+
+
+def detect_acquisition_layout(path: Path) -> Dict[str, float]:
+    """Auto-detect the raw layout of a TR file (works for any range resolution).
+
+    Reads the bin width from the file, computes the Licel pretrigger length
+    (round(3840 / bin_width) — 1024 bins @3.75 m, 128 @30 m), and decides whether
+    the acquisition actually used a pretrigger by locating the near-field analog
+    peak: with a pretrigger the strong laser return sits just AFTER the flat
+    pre-trigger region (at ~pretrigger_bins); without one it sits at bin ~0.
+
+    Returns {bin_width_m, total_bins, pretrigger_bins, has_pretrigger (0/1)}.
+    """
+    path = Path(path)
+    arr = _read_tr40_dat_ascii_array(path, trim_trailing_zeros=False)
+    total = int(arr.shape[0])
+    bw = read_bin_width_m(path)
+    pre_exp = int(round(PRETRIGGER_TRACE_DISTANCE_M / bw)) if bw > 0 else 0
+
+    # Detect the pretrigger from the BIN-COUNT structure (daytime-robust: the
+    # signal peak is buried in solar background, so peak-finding is unreliable).
+    # A Licel pretrigger acquisition leaves a round signal-bin count (8000, 4000,
+    # 1000 …) while the total is then NOT round (9024, 5024, 1128). Fall back to
+    # the Licel norm (pretrigger on) only when the counts are genuinely ambiguous.
+    def _round(n: int) -> bool:
+        return n > 0 and (n % 500 == 0)
+
+    has_pre = False
+    if pre_exp > 0 and total > pre_exp * 2:
+        signal = total - pre_exp
+        if _round(signal) and not _round(total):
+            has_pre = True          # signal count round, total not → pretrigger
+        elif _round(total):
+            has_pre = False         # total already round → no pretrigger
+        else:
+            has_pre = True          # ambiguous → Licel default (pretrigger on)
+
+    return {
+        "bin_width_m": float(bw),
+        "total_bins": float(total),
+        "pretrigger_bins": float(pre_exp if has_pre else 0),
+        "has_pretrigger": 1.0 if has_pre else 0.0,
+    }
+
+
+def set_poisson_stderr_mode(mode: str) -> None:
+    """Set how the raw-binary decoder treats a corrupt hardware photon StErr.
+
+    'auto' (default) repairs it with the Poisson shot-noise estimate only when it
+    is detectably corrupt, 'off' always reports the raw hardware value, 'always'
+    always uses the Poisson estimate. Thin re-export of the same function in
+    ``licel_binary_reader`` so callers need only one import.
+    See docs/licel_stderr_limitation.md."""
+    import licel_binary_reader as _lbr  # local import: no circular dependency
+
+    _lbr.set_poisson_stderr_mode(mode)
+
+
+def get_poisson_stderr_mode() -> str:
+    """Current raw-binary photon-StErr policy ('auto' / 'off' / 'always')."""
+    import licel_binary_reader as _lbr
+
+    return _lbr.get_poisson_stderr_mode()
+
+
+def _read_licel_binary_array(path: Path, *,
+                             poisson_stderr: Optional[str] = None) -> np.ndarray:
     """Decode a Licel raw binary file to the same column layout an ASCII export
     would yield: cols 0-3 parallel, 4-7 the perpendicular channel, col 8 the
     per-bin overflow flag (binary files carry overflow; ASCII exports drop it)."""
@@ -221,7 +332,7 @@ def _read_licel_binary_array(path: Path) -> np.ndarray:
             f"acquisition); decoded values are not physically meaningful.",
             RuntimeWarning, stacklevel=3,
         )
-    return _lbr.raw_file_to_array(rf)
+    return _lbr.raw_file_to_array(rf, poisson_stderr=poisson_stderr)
 
 
 def _parse_ascii_dat_array(path: Path, *, start_mode: str = "auto") -> np.ndarray:
