@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import warnings
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -82,6 +83,16 @@ except ImportError:
 
     def _nrb_set_poisson_stderr_mode(mode: str) -> None:  # no-op fallback
         pass
+
+# Validation engine (Step 6 — prototype vs Mini-MPL intercomparison)
+try:
+    from validation_engine import (
+        run_validation as _val_run,
+        write_validation_workbook as _val_write,
+    )
+    _HAS_VALIDATION = True
+except ImportError:
+    _HAS_VALIDATION = False
 
 # Overlap module (Step 2 — overlap correction)
 try:
@@ -399,6 +410,7 @@ NAV_ITEMS = [
     ("step3", "ALT",                 "📊"),  # 3
     ("step5", "Fernald",             "🔬"),  # 4
     ("step4", "Display / Visualize", "🌈"),  # 5
+    ("step7", "Validation",          "✅"),  # 6
 ]
 
 
@@ -8154,6 +8166,583 @@ class Step6Page(ctk.CTkFrame):
 # ═════════════════════════════════════════════════════════════════════════════
 # Placeholder (no longer needed — all 4 steps migrated)
 # ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 6 Page  –  Validation vs Mini-MPL  (case comparison)
+# ═════════════════════════════════════════════════════════════════════════════
+def _val_metric(result: dict, key: str) -> float:
+    """One number out of a validation result's summary row, NaN when absent."""
+    try:
+        v = float(result["summary"].iloc[0][key])
+    except Exception:
+        return float("nan")
+    return v
+
+
+VALIDATION_PLOT_MODES = [
+    "Relative difference (EARLINET)",
+    "Ratio vs range",
+    "Scatter: prototype vs MPL",
+    "Depolarization agreement",
+    "Summary table",
+]
+
+# One colour per case slot, reused across every figure so a case keeps its
+# identity when the plot mode changes.
+_VAL_CASE_COLORS = ("#E8743B", "#1F4E79")
+
+
+class Step7Page(ctk.CTkFrame):
+    """Compare one or two prototype cases against the Mini-MPL reference.
+
+    The Mini-MPL is a temporary referee: the point of this page is to establish
+    that the prototype reproduces a known-good instrument well enough to be
+    trusted on its own, and to say which acquisition configuration does it
+    better. Everything is computed on real range with the pre-trigger already
+    removed, inside the boundary layer (default 300-5000 m).
+    """
+
+    def __init__(self, master, app_state: AppState):
+        super().__init__(master, fg_color="transparent")
+        self.app_state = app_state
+
+        # ── State: two case slots ───────────────────────────────────────────
+        self.case1_label = tk.StringVar(value="Case 01")
+        self.case1_proto = tk.StringVar(value="")
+        self.case1_mpl = tk.StringVar(value="")
+        self.case2_label = tk.StringVar(value="Case 02")
+        self.case2_proto = tk.StringVar(value="")
+        self.case2_mpl = tk.StringVar(value="")
+        self.case2_enable = tk.BooleanVar(value=True)
+
+        self.out_path = tk.StringVar(value="")
+        self.rmin_m = tk.DoubleVar(value=300.0)
+        self.rmax_m = tk.DoubleVar(value=5000.0)
+        self.snr_min = tk.DoubleVar(value=3.0)
+        self.time_filter = tk.StringVar(value="night")
+        self.match_tol_min = tk.DoubleVar(value=5.0)
+        self.plot_mode = tk.StringVar(value=VALIDATION_PLOT_MODES[0])
+        self.progress = tk.DoubleVar(value=0.0)
+
+        self._results: List[dict] = []
+
+        if not _HAS_VALIDATION:
+            self._build_missing_view()
+            return
+        self._build_ui()
+
+    # ── Backend missing fallback ───────────────────────────────────────────
+    def _build_missing_view(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        card = Card(self, title="Backend missing", icon="⚠️")
+        card.grid(row=0, column=0, sticky="nsew")
+        ctk.CTkLabel(
+            card.body,
+            text="validation_engine.py was not found alongside this script.\n"
+                 "Step 6 needs that module to compare a case against the Mini-MPL.",
+            font=theme.F_BODY, text_color=theme.TEXT_SECONDARY, justify="left",
+        ).pack(pady=20)
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        PageHeader(
+            self,
+            title="Step 6 · Validation vs Mini-MPL",
+            subtitle="Case 01 vs Case 02 · EARLINET-style relative difference, ratio "
+                     "constancy and regression · boundary layer only, real range",
+            badge=("intercomparison", "navy"),
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 16))
+
+        self.paned = tk.PanedWindow(
+            self, orient="horizontal", bg=theme.APP_BG, sashrelief="flat",
+            sashwidth=8, sashpad=0, bd=0, showhandle=False,
+        )
+        self.paned.grid(row=1, column=0, sticky="nsew")
+
+        left_pane = tk.Frame(self.paned, bg=theme.APP_BG, bd=0, highlightthickness=0)
+        left_pane.grid_columnconfigure(0, weight=1)
+        left_pane.grid_rowconfigure(0, weight=1)
+        self.paned.add(left_pane, minsize=380, width=620, stretch="always")
+
+        left = ctk.CTkScrollableFrame(left_pane, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_columnconfigure(0, weight=1)
+        self._build_cases_card(left).grid(row=0, column=0, sticky="ew", pady=(0, 12), padx=(0, 10))
+        self._build_settings_card(left).grid(row=1, column=0, sticky="ew", pady=(0, 12), padx=(0, 10))
+        self._build_run_card(left).grid(row=2, column=0, sticky="ew", pady=(0, 12), padx=(0, 10))
+        self._build_console_card(left).grid(row=3, column=0, sticky="nsew", padx=(0, 10))
+
+        right_pane = tk.Frame(self.paned, bg=theme.APP_BG, bd=0, highlightthickness=0)
+        right_pane.grid_columnconfigure(0, weight=1)
+        right_pane.grid_rowconfigure(0, weight=1)
+        self.paned.add(right_pane, minsize=380, stretch="always")
+
+        right = ctk.CTkFrame(right_pane, fg_color="transparent")
+        right.grid(row=0, column=0, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=1)
+        self._build_plot_card(right).grid(row=0, column=0, sticky="nsew")
+
+        self._sync_from_state()
+
+    @staticmethod
+    def _subsection(parent, text: str) -> ctk.CTkLabel:
+        return ctk.CTkLabel(parent, text=text.upper(), font=(theme.FONT_FAMILY, 10, "bold"),
+                            text_color=theme.TEXT_MUTED, anchor="w")
+
+    def _file_row(self, parent, row: int, label: str, var: tk.StringVar,
+                  title: str, types) -> None:
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+        f.grid(row=row, column=0, sticky="ew", pady=(0, 4))
+        f.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(f, text=label, font=theme.F_SMALL, width=112, anchor="w",
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkEntry(f, textvariable=var, **theme.input_style()).grid(
+            row=0, column=1, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            f, text="…", width=36,
+            command=lambda: self._pick_into(var, title, types),
+            **theme.secondary_button_style(height=34, font=theme.F_SMALL),
+        ).grid(row=0, column=2)
+
+    def _build_cases_card(self, parent) -> "Card":
+        card = Card(parent, title="Cases to validate", icon="🧪")
+        body = card.body
+        body.grid_columnconfigure(0, weight=1)
+        xls = [("Excel", "*.xlsx *.xls")]
+
+        self._subsection(body, "Case 1").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        nr = ctk.CTkFrame(body, fg_color="transparent")
+        nr.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        nr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(nr, text="Label:", font=theme.F_SMALL, width=112, anchor="w",
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkEntry(nr, textvariable=self.case1_label, **theme.input_style()).grid(
+            row=0, column=1, sticky="ew")
+        self._file_row(body, 2, "Prototype:", self.case1_proto,
+                       "Prototype NRB / depolarization workbook", xls)
+        self._file_row(body, 3, "Mini-MPL:", self.case1_mpl,
+                       "Step 1 MPL workbook", xls)
+
+        self._subsection(body, "Case 2 (optional)").grid(row=4, column=0, sticky="ew", pady=(10, 4))
+        cb = ctk.CTkFrame(body, fg_color="transparent")
+        cb.grid(row=5, column=0, sticky="ew", pady=(0, 4))
+        ctk.CTkCheckBox(
+            cb, text="Compare a second case", variable=self.case2_enable,
+            font=theme.F_SMALL, text_color=theme.TEXT_PRIMARY,
+            fg_color=theme.ORANGE, hover_color=theme.ORANGE_HOVER,
+            border_color=theme.BORDER, checkmark_color="#fff",
+            corner_radius=4, border_width=2,
+        ).pack(side="left")
+        nr2 = ctk.CTkFrame(body, fg_color="transparent")
+        nr2.grid(row=6, column=0, sticky="ew", pady=(0, 4))
+        nr2.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(nr2, text="Label:", font=theme.F_SMALL, width=112, anchor="w",
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkEntry(nr2, textvariable=self.case2_label, **theme.input_style()).grid(
+            row=0, column=1, sticky="ew")
+        self._file_row(body, 7, "Prototype:", self.case2_proto,
+                       "Prototype NRB / depolarization workbook", xls)
+        self._file_row(body, 8, "Mini-MPL:", self.case2_mpl, "Step 1 MPL workbook", xls)
+
+        self._subsection(body, "Output").grid(row=9, column=0, sticky="ew", pady=(10, 4))
+        self._file_row(body, 10, "Workbook:", self.out_path,
+                       "Save validation workbook", xls)
+        ctk.CTkLabel(
+            body,
+            text="A prototype workbook needs an NRB_co (or 'NRB profile') sheet; the "
+                 "MPL workbook is a Step 1 output. If the MPL workbook was built by "
+                 "the extended Step 1 it also carries MPL_copol_snr, and the SNR mask "
+                 "is then applied to BOTH instruments instead of ours alone.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=11, column=0, sticky="w", pady=(4, 0))
+        return card
+
+    def _build_settings_card(self, parent) -> "Card":
+        card = Card(parent, title="Comparison window", icon="📏")
+        body = card.body
+        body.grid_columnconfigure(0, weight=1)
+
+        f = ctk.CTkFrame(body, fg_color="transparent")
+        f.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        for i in range(3):
+            f.grid_columnconfigure(i, weight=1)
+        FieldRow(f, "R min (m)", self.rmin_m).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        FieldRow(f, "R max (m)", self.rmax_m).grid(row=0, column=1, sticky="ew", padx=3)
+        FieldRow(f, "min SNR", self.snr_min).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        g = ctk.CTkFrame(body, fg_color="transparent")
+        g.grid(row=1, column=0, sticky="ew", pady=(4, 4))
+        g.grid_columnconfigure(2, weight=1)
+        ctk.CTkLabel(g, text="Profiles:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkOptionMenu(
+            g, variable=self.time_filter, values=["night", "day", "all"],
+            fg_color=theme.CARD_BG, button_color=theme.CARD_BG,
+            button_hover_color=theme.CREAM_SOFT, text_color=theme.TEXT_PRIMARY,
+            dropdown_fg_color=theme.CARD_BG, dropdown_text_color=theme.TEXT_PRIMARY,
+            dropdown_hover_color=theme.CREAM, corner_radius=theme.RADIUS_INPUT,
+            height=32, font=theme.F_BODY, width=120,
+        ).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(g, text="match tol (min):", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=2, sticky="e", padx=(12, 8))
+        ctk.CTkEntry(g, textvariable=self.match_tol_min, width=70,
+                     **theme.input_style()).grid(row=0, column=3, sticky="w")
+
+        ctk.CTkLabel(
+            body,
+            text="Range is REAL range with the pre-trigger already removed, so the same "
+                 "window means the same altitude at 3.75 m and at 30 m. Above ~5 km is no "
+                 "longer boundary layer, and the Mini-MPL's own SNR seldom reaches past "
+                 "~4 km. Night is 18:00-06:00 local; each prototype profile is paired "
+                 "with the nearest MPL profile in time.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        return card
+
+    def _build_run_card(self, parent) -> "Card":
+        card = Card(parent)
+        body = card.body
+        body.grid_columnconfigure(1, weight=1)
+        self.run_btn = ctk.CTkButton(
+            body, text="▶  Run Validation", command=self.run,
+            **theme.primary_button_style(), width=200)
+        self.run_btn.grid(row=0, column=0, sticky="w")
+        self.pb = ctk.CTkProgressBar(
+            body, variable=self.progress, progress_color=theme.ORANGE,
+            fg_color=theme.LIGHT_GRAY, height=8, corner_radius=4)
+        self.pb.set(0)
+        self.pb.grid(row=0, column=1, sticky="ew", padx=(16, 12))
+        self.status = StatusBar(body)
+        self.status.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        return card
+
+    def _build_console_card(self, parent) -> "ConsoleLog":
+        self.console = ConsoleLog(parent)
+        return self.console
+
+    def _build_plot_card(self, parent) -> "Card":
+        card = Card(parent, title="Validation result", icon="📈")
+        body = card.body
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        ctrl = ctk.CTkFrame(body, fg_color="transparent")
+        ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(ctrl, text="View:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left")
+        ctk.CTkOptionMenu(
+            ctrl, variable=self.plot_mode, values=VALIDATION_PLOT_MODES,
+            command=lambda _v: self.refresh_plot(),
+            fg_color=theme.CARD_BG, button_color=theme.CARD_BG,
+            button_hover_color=theme.CREAM_SOFT, text_color=theme.TEXT_PRIMARY,
+            dropdown_fg_color=theme.CARD_BG, dropdown_text_color=theme.TEXT_PRIMARY,
+            dropdown_hover_color=theme.CREAM, corner_radius=theme.RADIUS_INPUT,
+            height=32, font=theme.F_BODY, width=250,
+        ).pack(side="left", padx=(6, 12))
+        ctk.CTkButton(ctrl, text="Save PNG", command=self.save_png,
+                      **theme.ghost_button_style(width=90, height=32)).pack(side="left")
+
+        wrap = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=theme.RADIUS_INPUT,
+                            border_width=1, border_color=theme.BORDER)
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.grid_columnconfigure(0, weight=1)
+        wrap.grid_rowconfigure(0, weight=1)
+        self.fig = plt.Figure(figsize=(7, 5.6), dpi=100, facecolor=theme.CARD_BG)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_title("No data — run the validation first")
+        self.ax.grid(True, alpha=0.3)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=wrap)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        return card
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+    def _log(self, msg):
+        self.console.log(msg)
+
+    def _safe(self, fn, *a, **kw):
+        self.after(0, lambda: fn(*a, **kw))
+
+    def _safe_log(self, msg):
+        self._safe(self._log, msg)
+
+    def _pick_into(self, var, title, filetypes):
+        p = filedialog.askopenfilename(title=title, filetypes=filetypes + [("All", "*.*")])
+        if p:
+            var.set(p)
+
+    def _sync_from_state(self):
+        """Pre-fill Case 1 from whatever the session has already produced."""
+        if not self.case1_proto.get().strip():
+            src = self.app_state.depol_output or self.app_state.step2_output
+            if src:
+                self.case1_proto.set(src)
+        if not self.case1_mpl.get().strip() and getattr(self.app_state, "step1_output", ""):
+            self.case1_mpl.set(self.app_state.step1_output)
+        if not self.out_path.get().strip() and self.case1_proto.get().strip():
+            p = Path(self.case1_proto.get().strip())
+            self.out_path.set(str(p.with_name("Validation-" + p.stem + ".xlsx")))
+
+    # ── Run ────────────────────────────────────────────────────────────────
+    def run(self):
+        slots = [(self.case1_label.get().strip() or "Case 01",
+                  self.case1_proto.get().strip(), self.case1_mpl.get().strip())]
+        if bool(self.case2_enable.get()) and self.case2_proto.get().strip():
+            slots.append((self.case2_label.get().strip() or "Case 02",
+                          self.case2_proto.get().strip(), self.case2_mpl.get().strip()))
+
+        for label, proto, mpl in slots:
+            if not proto or not Path(proto).exists():
+                messagebox.showerror("Missing file",
+                                     f"{label}: prototype workbook not found."); return
+            if not mpl or not Path(mpl).exists():
+                messagebox.showerror("Missing file",
+                                     f"{label}: Mini-MPL workbook not found."); return
+
+        out = self.out_path.get().strip()
+        if not out:
+            p = Path(slots[0][1])
+            out = str(p.with_name("Validation-" + p.stem + ".xlsx"))
+            self.out_path.set(out)
+
+        try:
+            params = dict(
+                rmin_m=float(self.rmin_m.get()), rmax_m=float(self.rmax_m.get()),
+                snr_min=float(self.snr_min.get()),
+                time_filter=self.time_filter.get().strip().lower(),
+                match_tolerance_min=float(self.match_tol_min.get()),
+            )
+        except Exception as e:
+            messagebox.showerror("Invalid parameter", str(e)); return
+
+        self.run_btn.configure(state="disabled")
+        self.progress.set(0.0); self.pb.set(0.0)
+        self.status.set("Running…", "running")
+        self._log("=== START Validation ===")
+        self._log(f"window {params['rmin_m']:.0f}-{params['rmax_m']:.0f} m (real range) · "
+                  f"SNR >= {params['snr_min']:g} · {params['time_filter']} profiles")
+
+        def worker():
+            try:
+                results = []
+                for i, (label, proto, mpl) in enumerate(slots, 1):
+                    self._safe_log(f"--- {label} ---")
+                    results.append(_val_run(proto, mpl, case_label=label,
+                                            logger=self._safe_log, **params))
+                    self._safe(self.progress.set, 100.0 * i / len(slots))
+                    self._safe(self.pb.set, i / len(slots))
+                _val_write(results, Path(out))
+                self._results = results
+                self._safe(self._log, f"[OK] Saved: {Path(out).resolve()}")
+                self._safe(self._log_verdict, results)
+                self._safe(self.status.set, "Done", "ok")
+                self._safe(self.refresh_plot)
+                self._safe(messagebox.showinfo, "Validation Complete", f"Saved:\n{out}")
+            except Exception as e:
+                self._safe(self._log, f"[FAILED] {e}")
+                self._safe(self.status.set, "Failed", "error")
+                self._safe(messagebox.showerror, "Failed", str(e))
+            finally:
+                self._safe(self.run_btn.configure, state="normal")
+                self._safe(self._log, "=== END ===")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _log_verdict(self, results):
+        """Say which case agrees better, and on what evidence."""
+        if len(results) < 2:
+            return
+        best = min(results, key=lambda r: _val_metric(r, "Ratio CV % (median)"))
+        self._log("")
+        for r in results:
+            self._log(
+                f"{r['label']}: ratio CV {_val_metric(r, 'Ratio CV % (median)'):.1f}% · "
+                f"within 20% on {_val_metric(r, 'Within 20% (median)'):.0f}% of bins · "
+                f"r2 {_val_metric(r, 'Regression r2 (median)'):.2f}")
+        self._log(f">> {best['label']} reproduces the Mini-MPL profile shape more "
+                  f"closely in this window.")
+
+    # ── Plot ───────────────────────────────────────────────────────────────
+    def refresh_plot(self):
+        self.fig.clear()
+        self.ax = self.fig.add_subplot(111)
+        if not self._results:
+            self.ax.set_title("No data — run the validation first")
+            self.ax.grid(True, alpha=0.3)
+            self.canvas.draw_idle()
+            return
+        mode = self.plot_mode.get()
+        try:
+            if mode.startswith("Relative"):
+                self._plot_reldiff()
+            elif mode.startswith("Ratio"):
+                self._plot_ratio()
+            elif mode.startswith("Scatter"):
+                self._plot_scatter()
+            elif mode.startswith("Depol"):
+                self._plot_depol()
+            else:
+                self._plot_summary()
+        except Exception as e:
+            self.ax.clear()
+            self.ax.text(0.5, 0.5, f"Plot failed:\n{e}", ha="center", va="center",
+                         transform=self.ax.transAxes, fontsize=9)
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
+
+    def _plot_reldiff(self):
+        """EARLINET-style relative difference profile with tolerance bands."""
+        ax = self.ax
+        for band, alpha in ((20.0, 0.08), (10.0, 0.12)):
+            ax.axvspan(-band, band, color="#7FB069", alpha=alpha, zorder=0)
+        ax.axvline(0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+        for i, res in enumerate(self._results):
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            st = res["reldiff_stats"]
+            st = st[st["n_profiles"] > 0]
+            if st.empty:
+                continue
+            y = st["Range(m)"].to_numpy(float) / 1000.0
+            m = st["median_pct"].to_numpy(float)
+            s = st["std_pct"].to_numpy(float)
+            ax.fill_betweenx(y, m - s, m + s, color=c, alpha=0.15, zorder=2)
+            ax.plot(m, y, color=c, lw=1.8, label=res["label"], zorder=3)
+        ax.set_xlabel("Relative difference  (prototype − MPL) / MPL  [%]")
+        ax.set_ylabel("Range [km]")
+        ax.set_title("Relative difference profile (shaded = ±1σ across profiles;\n"
+                     "green bands = ±10 % and ±20 % tolerance)", fontsize=10)
+        ax.set_xlim(-120, 120)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+    def _plot_ratio(self):
+        """Ratio normalised to its own median — 1.0 everywhere = perfect shape."""
+        ax = self.ax
+        ax.axvline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+        for i, res in enumerate(self._results):
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            df = res["ratio"]
+            y = df["Range(m)"].to_numpy(float) / 1000.0
+            block = df.drop(columns=["Range(m)"]).to_numpy(float)
+            if not block.size:
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                med = np.nanmedian(block, axis=1)
+                lo = np.nanpercentile(block, 25, axis=1)
+                hi = np.nanpercentile(block, 75, axis=1)
+            ax.fill_betweenx(y, lo, hi, color=c, alpha=0.15, zorder=2)
+            ax.plot(med, y, color=c, lw=1.8, label=res["label"], zorder=3)
+        ax.set_xlabel("Prototype / MPL, normalised to its own median")
+        ax.set_ylabel("Range [km]")
+        ax.set_title("Ratio constancy (shaded = inter-quartile range;\n"
+                     "a vertical line at 1.0 means identical profile shape)", fontsize=10)
+        ax.set_xlim(0, 2.5)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+    def _plot_scatter(self):
+        """Per-profile regression slope against r², one point per profile."""
+        ax = self.ax
+        for i, res in enumerate(self._results):
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            pp = res["per_profile"]
+            pp = pp[pp["n_bins"] >= 3]
+            if pp.empty:
+                continue
+            ax.scatter(pp["slope"], pp["r2"], s=46, color=c, alpha=0.8,
+                       edgecolors="white", linewidths=0.8, label=res["label"])
+        ax.axvline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--")
+        ax.axhline(0.9, color="#7FB069", lw=1, ls=":")
+        ax.set_xlabel("Regression slope  (1.0 = correct amplitude)")
+        ax.set_ylabel("r²  (1.0 = same shape)")
+        ax.set_title("Per-profile regression against the Mini-MPL\n"
+                     "(ideal is the top of the dashed vertical line)", fontsize=10)
+        ax.set_xlim(-0.5, 2.0)
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+    def _plot_depol(self):
+        ax = self.ax
+        any_data = False
+        for i, res in enumerate(self._results):
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            dp = res.get("depol")
+            if dp is None or not len(dp):
+                continue
+            any_data = True
+            ax.scatter(dp["delta_mpl_median"], dp["delta_proto_median"],
+                       s=46, color=c, alpha=0.8, edgecolors="white",
+                       linewidths=0.8, label=res["label"])
+        if not any_data:
+            ax.text(0.5, 0.5,
+                    "No depolarization comparison available.\n"
+                    "The prototype workbook needs a Depol_delta_v sheet and the\n"
+                    "MPL workbook an MPL_depol sheet.",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=10,
+                    color=theme.TEXT_MUTED)
+            ax.set_axis_off()
+            return
+        lim = max(0.05, ax.get_xlim()[1], ax.get_ylim()[1])
+        ax.plot([0, lim], [0, lim], color=theme.TEXT_MUTED, lw=1, ls="--")
+        ax.set_xlabel("Mini-MPL δ  (converted: δ = d/(1−d))")
+        ax.set_ylabel("Prototype δ_v  (cross / co)")
+        ax.set_title("Volume depolarization, definitions aligned\n"
+                     "(dashed line = perfect agreement)", fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+    def _plot_summary(self):
+        """Render the cross-case comparison as a table inside the figure."""
+        ax = self.ax
+        ax.set_axis_off()
+        rows = [
+            ("Profiles valid", "Profiles valid", "{:.0f}"),
+            ("Bins / profile", "Bins per profile (median)", "{:.0f}"),
+            ("Ratio CV [%]", "Ratio CV % (median)", "{:.1f}"),
+            ("Rel diff RMS [%]", "Rel diff RMS % (median)", "{:.1f}"),
+            ("Within 10 % [%]", "Within 10% (median)", "{:.0f}"),
+            ("Within 20 % [%]", "Within 20% (median)", "{:.0f}"),
+            ("Slope", "Regression slope (median)", "{:.2f}"),
+            ("r²", "Regression r2 (median)", "{:.2f}"),
+            ("Depol rel diff [%]", "Depol rel diff % (median)", "{:.1f}"),
+        ]
+        labels = [r["label"] for r in self._results]
+        cells = []
+        for disp, key, fmt in rows:
+            line = []
+            for res in self._results:
+                v = _val_metric(res, key)
+                line.append(fmt.format(v) if np.isfinite(v) else "—")
+            cells.append(line)
+        tbl = ax.table(cellText=cells, rowLabels=[r[0] for r in rows],
+                       colLabels=labels, loc="center", cellLoc="center")
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1.0, 1.6)
+        first = self._results[0]["summary"].iloc[0]
+        ax.set_title(f"Validation summary — window {first['Window (m)']} m, "
+                     f"{first['Time filter']} profiles, SNR ≥ {first['SNR min']:g}",
+                     fontsize=10)
+
+    def save_png(self):
+        if not self._results:
+            messagebox.showinfo("No data", "Run the validation first."); return
+        p = filedialog.asksaveasfilename(
+            title="Save figure", defaultextension=".png",
+            filetypes=[("PNG", "*.png")])
+        if not p:
+            return
+        self.fig.savefig(p, dpi=200, bbox_inches="tight", facecolor="white")
+        self._log(f"Saved figure -> {p}")
+
+
 class PlaceholderPage(ctk.CTkFrame):
     def __init__(self, master, step_label: str, description: str):
         super().__init__(master, fg_color="transparent")
@@ -8217,6 +8806,7 @@ class App(ctk.CTk):
         self.pages["step4"] = Step4Page(self.content, self.app_state)
         self.pages["step5"] = Step5Page(self.content, self.app_state)
         self.pages["step6"] = Step6Page(self.content, self.app_state)
+        self.pages["step7"] = Step7Page(self.content, self.app_state)
 
         self.show_step("step1")
 
@@ -8224,6 +8814,7 @@ class App(ctk.CTk):
     def _desc_for(step_id: str) -> str:
         return {
             "step1": "Build the rmin-rmax search table from MPL data.",
+            "step7": "Validate a prototype case against the Mini-MPL reference.",
             "step2": "Convert TR40 .dat files into a daily NRB profile workbook.",
             "step3": "Detect aerosol layer top (ALT) using FFT + HWCT.",
             "step4": "Display / Visualize — RTI, profile comparison, ALT overlay.",
