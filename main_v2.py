@@ -59,8 +59,9 @@ from main import (
 # Full MPL product extraction (Step 1 — validation references for TR40).
 # mpl_reader has no tkinter dependency, safe to import alongside main.
 try:
-    from mpl_reader import (read_mpl_products, read_mpl_raw,
-                            MPL_PARTICLE_TYPE_MAP, _MPL_PROFILE_COLS)
+    from mpl_reader import (read_mpl_products, read_mpl_raw, read_mpl_layers,
+                            MPL_PARTICLE_TYPE_MAP, _MPL_PROFILE_COLS,
+                            _MPL_WEATHER_COLS, _MPL_HOUSEKEEPING_COLS)
     _HAS_MPL_PRODUCTS = True
 except ImportError:
     _HAS_MPL_PRODUCTS = False
@@ -834,6 +835,8 @@ class Step1Page(ctk.CTkFrame):
                 mpl_raw_perp: Dict[pd.Timestamp, np.ndarray] = {}
                 mpl_raw_range = None
                 range_m_master = None
+                # Per-cloud rows (one row per detected cloud, long format)
+                cloud_rows: List[dict] = []
                 copol_n = 498
                 total = len(ordered)
 
@@ -848,8 +851,11 @@ class Step1Page(ctk.CTkFrame):
                         self._safe(self._log, f"   [WARN] copol: {e}")
                         copol_cols[ts] = np.full((copol_n,), np.nan)
 
-                    # Pull all MPL reference products (cross NRB, depol, ext, mass, type)
+                    # Pull all MPL reference products (cross NRB, depol, ext, mass,
+                    # type, SNR) plus the per-profile weather / housekeeping scalars.
                     mpl_aod = mpl_lr = np.nan
+                    mpl_scalars: Dict[str, float] = {}
+                    layers: Dict[str, object] = {}
                     if _HAS_MPL_PRODUCTS:
                         try:
                             prod = read_mpl_products(f, 0, copol_n)
@@ -859,8 +865,29 @@ class Step1Page(ctk.CTkFrame):
                                 mpl_cols[c][ts] = np.asarray(prod[c], float)
                             mpl_aod = float(prod.get("aod", np.nan))
                             mpl_lr = float(prod.get("lidar_ratio", np.nan))
+                            for c in (*_MPL_WEATHER_COLS, *_MPL_HOUSEKEEPING_COLS):
+                                mpl_scalars[c] = float(prod.get(c, np.nan))
+                            # .nc products already carry the layer geometry from
+                            # the same open handle; only re-open when they don't.
+                            layers = ({k: prod[k] for k in
+                                       ("pbl_km", "cloud_base_km", "cloud_top_km", "n_clouds")}
+                                      if "cloud_base_km" in prod else {})
                         except Exception as e:
                             self._safe(self._log, f"   [WARN] MPL products: {e}")
+                        try:
+                            if not layers:
+                                layers = read_mpl_layers(f)
+                            for k, (cb, ctop) in enumerate(zip(
+                                    np.asarray(layers.get("cloud_base_km", [])),
+                                    np.asarray(layers.get("cloud_top_km", []))), 1):
+                                cloud_rows.append({
+                                    "Time": ts, "cloud_index": k,
+                                    "base_m": float(cb) * 1000.0,
+                                    "top_m": float(ctop) * 1000.0,
+                                    "thickness_m": (float(ctop) - float(cb)) * 1000.0,
+                                })
+                        except Exception as e:
+                            self._safe(self._log, f"   [WARN] MPL layers: {e}")
                         try:
                             raw = read_mpl_raw(f, 0, copol_n)
                             if mpl_raw_range is None and np.isfinite(raw["range_m"]).any():
@@ -899,6 +926,21 @@ class Step1Page(ctk.CTkFrame):
                     if _HAS_MPL_PRODUCTS:
                         row["MPL_aod"] = mpl_aod
                         row["MPL_lidar_ratio"] = mpl_lr
+                        # Extra PBL candidates beyond the primary one.
+                        pbl_all = np.asarray(layers.get("pbl_km", []), float)
+                        pbl_all = pbl_all[np.isfinite(pbl_all)]
+                        row["PBL candidates"] = int(pbl_all.size)
+                        for k, v in enumerate(pbl_all[1:4], 2):
+                            row[f"PBL{k} (m)"] = float(v) * 1000.0
+                        # Cloud geometry (lowest cloud + how many were found).
+                        cb = np.asarray(layers.get("cloud_base_km", []), float)
+                        ct = np.asarray(layers.get("cloud_top_km", []), float)
+                        row["N clouds"] = int(layers.get("n_clouds", 0) or 0)
+                        row["Cloud1 base (m)"] = float(cb[0]) * 1000.0 if cb.size else np.nan
+                        row["Cloud1 top (m)"] = float(ct[0]) * 1000.0 if ct.size else np.nan
+                        # Weather + housekeeping (sentinel fills already NaN).
+                        for c in (*_MPL_WEATHER_COLS, *_MPL_HOUSEKEEPING_COLS):
+                            row[c] = mpl_scalars.get(c, np.nan)
                     rows.append(row)
                     self._safe(self.progress.set, 100.0 * i / total)
                     self._safe(self.pb.set, i / total)
@@ -920,6 +962,8 @@ class Step1Page(ctk.CTkFrame):
                     "extinction_coefficient": "MPL_extinction",
                     "mass_concentration":     "MPL_mass",
                     "particle_type":          "MPL_particle_type",
+                    "copol_snr":              "MPL_copol_snr",
+                    "crosspol_snr":           "MPL_crosspol_snr",
                 }
                 mpl_dfs: Dict[str, pd.DataFrame] = {}
                 if _HAS_MPL_PRODUCTS and mpl_range_master is not None:
@@ -970,10 +1014,32 @@ class Step1Page(ctk.CTkFrame):
                         raw_perp_df.to_excel(xw, index=False, sheet_name="MPL_crosspol_raw")
                     for sheet, d in mpl_dfs.items():
                         d.to_excel(xw, index=False, sheet_name=sheet)
+                    if cloud_rows:
+                        pd.DataFrame(cloud_rows).to_excel(
+                            xw, index=False, sheet_name="MPL_clouds")
 
                 if mpl_dfs:
                     self._safe(self._log,
                                f"MPL reference sheets written: {', '.join(mpl_dfs.keys())}")
+                if cloud_rows:
+                    self._safe(self._log,
+                               f"MPL_clouds: {len(cloud_rows)} cloud(s) across "
+                               f"{len({r['Time'] for r in cloud_rows})} profile(s)")
+                # Say plainly which weather fields actually carry a reading — the
+                # Mini-MPL writes a sentinel when no weather station is attached.
+                if _HAS_MPL_PRODUCTS and rows:
+                    have = [c for c in _MPL_WEATHER_COLS
+                            if np.isfinite(pd.to_numeric(
+                                pd.Series([r.get(c, np.nan) for r in rows]),
+                                errors="coerce")).any()]
+                    missing = [c for c in _MPL_WEATHER_COLS if c not in have]
+                    self._safe(self._log,
+                               "Weather with readings: "
+                               + (", ".join(c.replace("weather_", "") for c in have) or "none"))
+                    if missing:
+                        self._safe(self._log,
+                                   "Weather not recorded (no sensor): "
+                                   + ", ".join(c.replace("weather_", "") for c in missing))
                 self._safe(self._log, f"[OK] Saved: {outp.resolve()}")
                 self._copol_df = copol_df
                 self._crosspol_norm_df = crosspol_norm_df
