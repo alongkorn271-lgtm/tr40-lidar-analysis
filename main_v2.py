@@ -8294,7 +8294,9 @@ class Step7Page(ctk.CTkFrame):
                             text_color=theme.TEXT_MUTED, anchor="w")
 
     def _file_row(self, parent, row: int, label: str, var: tk.StringVar,
-                  title: str, types) -> None:
+                  title: str, types, save: bool = False) -> None:
+        """One 'label / entry / browse' row. ``save`` picks a Save-As dialog so a
+        NEW filename can be typed; an Open dialog cannot create one."""
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.grid(row=row, column=0, sticky="ew", pady=(0, 4))
         f.grid_columnconfigure(1, weight=1)
@@ -8304,7 +8306,8 @@ class Step7Page(ctk.CTkFrame):
             row=0, column=1, sticky="ew", padx=(0, 8))
         ctk.CTkButton(
             f, text="…", width=36,
-            command=lambda: self._pick_into(var, title, types),
+            command=lambda: (self._pick_save_into(var, title, types) if save
+                             else self._pick_into(var, title, types)),
             **theme.secondary_button_style(height=34, font=theme.F_SMALL),
         ).grid(row=0, column=2)
 
@@ -8350,7 +8353,7 @@ class Step7Page(ctk.CTkFrame):
 
         self._subsection(body, "Output").grid(row=9, column=0, sticky="ew", pady=(10, 4))
         self._file_row(body, 10, "Workbook:", self.out_path,
-                       "Save validation workbook", xls)
+                       "Save validation workbook", xls, save=True)
         ctk.CTkLabel(
             body,
             text="A prototype workbook needs an NRB_co (or 'NRB profile') sheet; the "
@@ -8476,6 +8479,35 @@ class Step7Page(ctk.CTkFrame):
         if p:
             var.set(p)
 
+    def _pick_save_into(self, var, title, filetypes):
+        """Save-As dialog, seeded with whatever is already in the field."""
+        cur = Path(var.get().strip()) if var.get().strip() else None
+        kw = {}
+        if cur is not None:
+            if cur.parent and str(cur.parent) not in (".", ""):
+                kw["initialdir"] = str(cur.parent)
+            if cur.name:
+                kw["initialfile"] = cur.name
+        p = filedialog.asksaveasfilename(
+            title=title, defaultextension=".xlsx",
+            filetypes=filetypes + [("All", "*.*")], **kw)
+        if p:
+            var.set(p)
+
+    def _resolve_out_path(self, typed: str, beside: str) -> Path:
+        """Turn whatever is in the Workbook field into a usable path.
+
+        A bare name like '2026-09-09-vs-08' is the natural thing to type, so add
+        the .xlsx suffix and drop the file next to the Case 1 prototype rather
+        than in whatever the process working directory happens to be.
+        """
+        out = Path(typed.strip())
+        if not out.suffix:
+            out = out.with_suffix(".xlsx")
+        if not out.is_absolute() and str(out.parent) in (".", ""):
+            out = Path(beside).parent / out.name
+        return out
+
     def _sync_from_state(self):
         """Pre-fill Case 1 from whatever the session has already produced."""
         if not self.case1_proto.get().strip():
@@ -8504,11 +8536,13 @@ class Step7Page(ctk.CTkFrame):
                 messagebox.showerror("Missing file",
                                      f"{label}: Mini-MPL workbook not found."); return
 
-        out = self.out_path.get().strip()
-        if not out:
+        typed = self.out_path.get().strip()
+        if typed:
+            out = str(self._resolve_out_path(typed, slots[0][1]))
+        else:
             p = Path(slots[0][1])
             out = str(p.with_name("Validation-" + p.stem + ".xlsx"))
-            self.out_path.set(out)
+        self.out_path.set(out)
 
         try:
             params = dict(
