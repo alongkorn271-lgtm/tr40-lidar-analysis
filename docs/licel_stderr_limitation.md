@@ -135,9 +135,25 @@ Measured on the 2026‑09‑09 30 m batch: 11 of 12 non‑empty files repaired (
 - Full‑daylight profiles (07:30–16:00) remain empty — but now for the correct physical reason
   (solar background ~102 MHz buries the signal), not a StErr artifact.
 
-**Caveat.** The Poisson model captures shot noise only (not atmospheric variability), so it is a
-clean lower‑bound estimate — appropriate for SNR / detection‑range work, and far better than the
-corrupt hardware value.
+**Caveat — the Poisson StErr is conservative at high count rates, not a lower bound.**
+Photon-counting dead time makes the counts sub-Poissonian, so in the strong near-field signal
+the plain Poisson StErr is larger than the true one. Measured on Case 01 (3.75 m), where the
+hardware StErr is valid:
+
+| count rate | Poisson / hardware | 1 / (1 − n·τ), τ = 3.06 ns | Poisson × (1 − n·τ) / hardware |
+|---|---|---|---|
+| 100–150 MHz | 1.68 | 1.53 | 1.09 |
+| 150–250 MHz | 1.94 | 2.01 | 0.95 |
+
+So on Case 02 the repaired SNR near the signal peak is ~1.5–2× **pessimistic**. Multiplying the
+Poisson value by (1 − n·τ) tracks the hardware StErr to within ~10 %. At low count rates the
+dead-time factor is ≈ 1 and the two estimates coincide.
+
+**Which files are affected.** Only Case 02 (30 m, ~6 000 shots) hits the 32-bit limit. Case 01
+(3.75 m, ~2 400 shots) is unaffected: all its files keep their valid hardware StErr. A few very
+short files at the start of a Case 02 run (51 and 92 shots, with a dataset reporting shots = 0)
+also carry a garbage StErr, but for a different reason — they are aborted/partial acquisitions,
+far below the overflow threshold.
 
 ---
 
