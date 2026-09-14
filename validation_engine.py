@@ -247,6 +247,8 @@ def compare_one(r_grid: np.ndarray, proto: np.ndarray, mpl: np.ndarray,
         "slope": np.nan, "intercept": np.nan, "r2": np.nan,
         "ratio_profile": np.full(r_grid.shape, np.nan),
         "reldiff_profile": np.full(r_grid.shape, np.nan),
+        "proto_scaled_profile": np.full(r_grid.shape, np.nan),
+        "mpl_profile": np.full(r_grid.shape, np.nan),
     }
     use = mask & np.isfinite(proto) & np.isfinite(mpl) & (np.abs(mpl) > 0)
     if use.sum() < 3:
@@ -284,6 +286,10 @@ def compare_one(r_grid: np.ndarray, proto: np.ndarray, mpl: np.ndarray,
         "slope": float(slope), "intercept": float(intercept), "r2": float(r2),
         "ratio_profile": ratio_full / k,   # normalised: 1.0 = perfectly flat
         "reldiff_profile": reldiff,
+        # The two curves that were actually compared (bins outside the mask NaN),
+        # prototype already divided by k so both sit on the MPL scale.
+        "proto_scaled_profile": np.where(use, scaled, np.nan),
+        "mpl_profile": np.where(use, mpl, np.nan),
     }
 
 
@@ -357,6 +363,10 @@ def run_validation(
     depol_rows: List[dict] = []
     reldiff_cols: Dict[str, np.ndarray] = {}
     ratio_cols: Dict[str, np.ndarray] = {}
+    proto_cols: Dict[str, np.ndarray] = {}
+    mplnrb_cols: Dict[str, np.ndarray] = {}
+    dep_proto_cols: Dict[str, np.ndarray] = {}
+    dep_mpl_cols: Dict[str, np.ndarray] = {}
 
     for p_ts, m_ts, dt_min in pairs:
         p_nrb = resample_to_grid(proto["range_m"], proto["nrb"][p_ts], r_grid)
@@ -374,6 +384,8 @@ def run_validation(
         name = pd.Timestamp(p_ts).strftime("%H:%M")
         reldiff_cols[name] = res.pop("reldiff_profile")
         ratio_cols[name] = res.pop("ratio_profile")
+        proto_cols[name] = res.pop("proto_scaled_profile")
+        mplnrb_cols[name] = res.pop("mpl_profile")
         rows.append({"Time": pd.Timestamp(p_ts), "MPL time": pd.Timestamp(m_ts),
                      "dt (min)": round(dt_min, 1), **res})
 
@@ -383,6 +395,8 @@ def run_validation(
             m_dep = mpl_depol_to_delta(mpl["depol"][m_ts])
             dm = in_window & np.isfinite(p_dep) & np.isfinite(m_dep) & (m_dep > 0)
             if dm.sum() >= 3:
+                dep_proto_cols[name] = np.where(dm, p_dep, np.nan)
+                dep_mpl_cols[name] = np.where(dm, m_dep, np.nan)
                 diff = (p_dep[dm] - m_dep[dm]) / m_dep[dm] * 100.0
                 depol_rows.append({
                     "Time": pd.Timestamp(p_ts), "n_bins": int(dm.sum()),
@@ -464,6 +478,11 @@ def run_validation(
         "ratio": ratio_df,
         "reldiff_stats": reldiff_stats,
         "depol": depol_df,
+        # Range x time curves, for drawing every view against range.
+        "proto_scaled": pd.DataFrame({"Range(m)": r_grid, **proto_cols}),
+        "mpl_nrb": pd.DataFrame({"Range(m)": r_grid, **mplnrb_cols}),
+        "depol_proto": pd.DataFrame({"Range(m)": r_grid, **dep_proto_cols}),
+        "depol_mpl": pd.DataFrame({"Range(m)": r_grid, **dep_mpl_cols}),
     }
 
 

@@ -8179,12 +8179,33 @@ def _val_metric(result: dict, key: str) -> float:
 
 
 VALIDATION_PLOT_MODES = [
-    "Relative difference (EARLINET)",
-    "Ratio vs range",
-    "Scatter: prototype vs MPL",
-    "Depolarization agreement",
-    "Summary table",
+    "1 · Profile overlay",
+    "2 · Relative difference (EARLINET)",
+    "3 · Ratio vs range",
+    "4 · Depolarization vs range",
+    "5 · Summary table",
 ]
+
+# What each view shows and how to read it — shown under the view selector.
+VALIDATION_VIEW_HELP = {
+    "1": ("กราฟ 1 · เอาเส้น NRB ของเรามาวางทับ Mini-MPL ตามระยะ\n"
+          "เส้นทึบ = prototype (หารค่าคงที่ k แล้วให้อยู่สเกลเดียวกับ MPL) · เส้นประ = Mini-MPL · "
+          "สี = case\nอ่านยังไง: ยิ่งเส้นทึบกับเส้นประทับกันมาก = เครื่องเราเห็นบรรยากาศเหมือน MPL "
+          "(ค่ามัธยฐานของทุก profile)"),
+    "2": ("กราฟ 2 · ต่างจาก MPL กี่ % ในแต่ละระยะ  = (prototype/k − MPL) / MPL × 100\n"
+          "แถบเขียว = ±10 % และ ±20 % (เกณฑ์ EARLINET) · เงาสี = ±1σ ระหว่าง profile\n"
+          "อ่านยังไง: เส้นอยู่ในแถบเขียว = ผ่าน · เส้นเบี้ยวไปทางลบ/บวกเป็นช่วง = มีปัญหาเชิงระบบที่ระยะนั้น"),
+    "3": ("กราฟ 3 · อัตราส่วน prototype / MPL ตามระยะ (หารด้วยค่ามัธยฐานของตัวเอง)\n"
+          "เส้นประที่ 1.0 = รูปทรงเหมือนกันทุกระยะ · เงาสี = ช่วงควอไทล์ 25–75 %\n"
+          "อ่านยังไง: เส้นแบนตรงที่ 1.0 = ต่างกันแค่ค่าคงที่ calibration · ลาดขึ้น/ลง = รูปทรงผิดที่ระยะนั้น"),
+    "4": ("กราฟ 4 · depolarization ratio ตามระยะ (ค่ามัธยฐานของทุก profile)\n"
+          "เส้นทึบ = δ ของเรา (cross/co) · เส้นประ = MPL ที่แปลงนิยามแล้ว δ = d/(1−d)\n"
+          "อ่านยังไง: สองเส้นทับกัน = calibration δ ของเราถูก · ต้องผ่านข้อนี้ก่อนจะเชื่อ cloud screen และ S_a"),
+    "5": ("กราฟ 5 · ตารางตัวเลขสรุปของแต่ละ case (ไม่มีแกน)\n"
+          "Ratio CV / Rel diff RMS: ยิ่งต่ำยิ่งดี · Within 10/20 %: ยิ่งสูงยิ่งดี · "
+          "Slope ใกล้ 1 และ r² ใกล้ 1 = ดี"),
+}
+
 
 # One colour per case slot, reused across every figure so a case keeps its
 # identity when the plot mode changes.
@@ -8451,9 +8472,16 @@ class Step7Page(ctk.CTkFrame):
         ctk.CTkButton(ctrl, text="Save PNG", command=self.save_png,
                       **theme.ghost_button_style(width=90, height=32)).pack(side="left")
 
+        self._view_help = ctk.CTkLabel(
+            body, text="", font=theme.F_SMALL, text_color=theme.TEXT_SECONDARY,
+            anchor="w", justify="left", wraplength=760)
+        self._view_help.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        body.grid_rowconfigure(1, weight=0)
+        body.grid_rowconfigure(2, weight=1)
+
         wrap = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=theme.RADIUS_INPUT,
                             border_width=1, border_color=theme.BORDER)
-        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.grid(row=2, column=0, sticky="nsew")
         wrap.grid_columnconfigure(0, weight=1)
         wrap.grid_rowconfigure(0, weight=1)
         self.fig = plt.Figure(figsize=(7, 5.6), dpi=100, facecolor=theme.CARD_BG)
@@ -8462,7 +8490,12 @@ class Step7Page(ctk.CTkFrame):
         self.ax.grid(True, alpha=0.3)
         self.canvas = FigureCanvasTkAgg(self.fig, master=wrap)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self._update_view_help()
         return card
+
+    def _update_view_help(self):
+        key = self.plot_mode.get().strip()[:1]
+        self._view_help.configure(text=VALIDATION_VIEW_HELP.get(key, ""))
 
     # ── Helpers ────────────────────────────────────────────────────────────
     def _log(self, msg):
@@ -8603,6 +8636,7 @@ class Step7Page(ctk.CTkFrame):
 
     # ── Plot ───────────────────────────────────────────────────────────────
     def refresh_plot(self):
+        self._update_view_help()
         self.fig.clear()
         self.ax = self.fig.add_subplot(111)
         if not self._results:
@@ -8610,18 +8644,10 @@ class Step7Page(ctk.CTkFrame):
             self.ax.grid(True, alpha=0.3)
             self.canvas.draw_idle()
             return
-        mode = self.plot_mode.get()
+        key = self.plot_mode.get().strip()[:1]
         try:
-            if mode.startswith("Relative"):
-                self._plot_reldiff()
-            elif mode.startswith("Ratio"):
-                self._plot_ratio()
-            elif mode.startswith("Scatter"):
-                self._plot_scatter()
-            elif mode.startswith("Depol"):
-                self._plot_depol()
-            else:
-                self._plot_summary()
+            {"1": self._plot_overlay, "2": self._plot_reldiff, "3": self._plot_ratio,
+             "4": self._plot_depol}.get(key, self._plot_summary)()
         except Exception as e:
             self.ax.clear()
             self.ax.text(0.5, 0.5, f"Plot failed:\n{e}", ha="center", va="center",
@@ -8629,92 +8655,115 @@ class Step7Page(ctk.CTkFrame):
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
+    # Every range-resolved view shares X = Range [km] over the comparison window.
+    def _range_axis(self, ax):
+        first = self._results[0]["summary"].iloc[0]
+        try:
+            lo, hi = (float(v) / 1000.0 for v in str(first["Window (m)"]).split("-"))
+            ax.set_xlim(lo, hi)
+        except Exception:
+            pass
+        ax.set_xlabel("Range [km]")
+        ax.grid(True, alpha=0.3)
+
+    @staticmethod
+    def _across_profiles(df, fn):
+        """Apply a nan-aware reducer across the time columns of a Range x time frame."""
+        x = df["Range(m)"].to_numpy(float) / 1000.0
+        block = df.drop(columns=["Range(m)"]).to_numpy(float)
+        if block.ndim != 2 or block.shape[1] == 0:
+            return x, np.full(x.shape, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return x, fn(block)
+
+    def _plot_overlay(self):
+        ax = self.ax
+        drew = False
+        for i, res in enumerate(self._results):
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            x, p_med = self._across_profiles(res["proto_scaled"], lambda b: np.nanmedian(b, axis=1))
+            _, m_med = self._across_profiles(res["mpl_nrb"], lambda b: np.nanmedian(b, axis=1))
+            ok_p = np.isfinite(p_med) & (p_med > 0)
+            ok_m = np.isfinite(m_med) & (m_med > 0)
+            if ok_m.any():
+                ax.plot(x[ok_m], m_med[ok_m], color=c, lw=1.6, ls="--",
+                        label=f"{res['label']} — Mini-MPL")
+                drew = True
+            if ok_p.any():
+                ax.plot(x[ok_p], p_med[ok_p], color=c, lw=1.8,
+                        label=f"{res['label']} — prototype ÷ k")
+                drew = True
+        if drew:
+            ax.set_yscale("log")
+        ax.set_ylabel("NRB (Mini-MPL scale)")
+        ax.set_title("Profile overlay — prototype (solid) vs Mini-MPL (dashed)\n"
+                     "median of all matched profiles", fontsize=10)
+        self._range_axis(ax)
+        ax.legend(fontsize=8)
+
     def _plot_reldiff(self):
-        """EARLINET-style relative difference profile with tolerance bands."""
+        """EARLINET-style relative difference, drawn against range."""
         ax = self.ax
         for band, alpha in ((20.0, 0.08), (10.0, 0.12)):
-            ax.axvspan(-band, band, color="#7FB069", alpha=alpha, zorder=0)
-        ax.axvline(0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+            ax.axhspan(-band, band, color="#7FB069", alpha=alpha, zorder=0)
+        ax.axhline(0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
             st = res["reldiff_stats"]
             st = st[st["n_profiles"] > 0]
             if st.empty:
                 continue
-            y = st["Range(m)"].to_numpy(float) / 1000.0
+            x = st["Range(m)"].to_numpy(float) / 1000.0
             m = st["median_pct"].to_numpy(float)
-            s = st["std_pct"].to_numpy(float)
-            ax.fill_betweenx(y, m - s, m + s, color=c, alpha=0.15, zorder=2)
-            ax.plot(m, y, color=c, lw=1.8, label=res["label"], zorder=3)
-        ax.set_xlabel("Relative difference  (prototype − MPL) / MPL  [%]")
-        ax.set_ylabel("Range [km]")
-        ax.set_title("Relative difference profile (shaded = ±1σ across profiles;\n"
-                     "green bands = ±10 % and ±20 % tolerance)", fontsize=10)
-        ax.set_xlim(-120, 120)
-        ax.grid(True, alpha=0.3)
+            sd = st["std_pct"].to_numpy(float)
+            ax.fill_between(x, m - sd, m + sd, color=c, alpha=0.15, zorder=2)
+            ax.plot(x, m, color=c, lw=1.8, label=res["label"], zorder=3)
+        ax.set_ylabel("(prototype − MPL) / MPL  [%]")
+        ax.set_title("Relative difference vs range\n"
+                     "green bands = ±10 % and ±20 % · shaded = ±1σ across profiles",
+                     fontsize=10)
+        ax.set_ylim(-120, 120)
+        self._range_axis(ax)
         ax.legend(fontsize=9)
 
     def _plot_ratio(self):
-        """Ratio normalised to its own median — 1.0 everywhere = perfect shape."""
+        """Ratio normalised to its own median, drawn against range."""
         ax = self.ax
-        ax.axvline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+        ax.axhline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
-            df = res["ratio"]
-            y = df["Range(m)"].to_numpy(float) / 1000.0
-            block = df.drop(columns=["Range(m)"]).to_numpy(float)
-            if not block.size:
+            x, med = self._across_profiles(res["ratio"], lambda b: np.nanmedian(b, axis=1))
+            _, lo = self._across_profiles(res["ratio"], lambda b: np.nanpercentile(b, 25, axis=1))
+            _, hi = self._across_profiles(res["ratio"], lambda b: np.nanpercentile(b, 75, axis=1))
+            if not np.isfinite(med).any():
                 continue
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                med = np.nanmedian(block, axis=1)
-                lo = np.nanpercentile(block, 25, axis=1)
-                hi = np.nanpercentile(block, 75, axis=1)
-            ax.fill_betweenx(y, lo, hi, color=c, alpha=0.15, zorder=2)
-            ax.plot(med, y, color=c, lw=1.8, label=res["label"], zorder=3)
-        ax.set_xlabel("Prototype / MPL, normalised to its own median")
-        ax.set_ylabel("Range [km]")
-        ax.set_title("Ratio constancy (shaded = inter-quartile range;\n"
-                     "a vertical line at 1.0 means identical profile shape)", fontsize=10)
-        ax.set_xlim(0, 2.5)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=9)
-
-    def _plot_scatter(self):
-        """Per-profile regression slope against r², one point per profile."""
-        ax = self.ax
-        for i, res in enumerate(self._results):
-            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
-            pp = res["per_profile"]
-            pp = pp[pp["n_bins"] >= 3]
-            if pp.empty:
-                continue
-            ax.scatter(pp["slope"], pp["r2"], s=46, color=c, alpha=0.8,
-                       edgecolors="white", linewidths=0.8, label=res["label"])
-        ax.axvline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--")
-        ax.axhline(0.9, color="#7FB069", lw=1, ls=":")
-        ax.set_xlabel("Regression slope  (1.0 = correct amplitude)")
-        ax.set_ylabel("r²  (1.0 = same shape)")
-        ax.set_title("Per-profile regression against the Mini-MPL\n"
-                     "(ideal is the top of the dashed vertical line)", fontsize=10)
-        ax.set_xlim(-0.5, 2.0)
-        ax.set_ylim(-0.05, 1.05)
-        ax.grid(True, alpha=0.3)
+            ax.fill_between(x, lo, hi, color=c, alpha=0.15, zorder=2)
+            ax.plot(x, med, color=c, lw=1.8, label=res["label"], zorder=3)
+        ax.set_ylabel("prototype / MPL  (÷ its own median)")
+        ax.set_title("Ratio vs range — flat at 1.0 means identical profile shape\n"
+                     "shaded = inter-quartile range across profiles", fontsize=10)
+        ax.set_ylim(0, 2.5)
+        self._range_axis(ax)
         ax.legend(fontsize=9)
 
     def _plot_depol(self):
         ax = self.ax
-        any_data = False
+        drew = False
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
-            dp = res.get("depol")
-            if dp is None or not len(dp):
+            dp, dm = res.get("depol_proto"), res.get("depol_mpl")
+            if dp is None or dm is None or dp.shape[1] < 2:
                 continue
-            any_data = True
-            ax.scatter(dp["delta_mpl_median"], dp["delta_proto_median"],
-                       s=46, color=c, alpha=0.8, edgecolors="white",
-                       linewidths=0.8, label=res["label"])
-        if not any_data:
+            x, p_med = self._across_profiles(dp, lambda b: np.nanmedian(b, axis=1))
+            _, m_med = self._across_profiles(dm, lambda b: np.nanmedian(b, axis=1))
+            if np.isfinite(m_med).any():
+                ax.plot(x, m_med, color=c, lw=1.6, ls="--", label=f"{res['label']} — Mini-MPL")
+                drew = True
+            if np.isfinite(p_med).any():
+                ax.plot(x, p_med, color=c, lw=1.8, label=f"{res['label']} — prototype δ_v")
+                drew = True
+        if not drew:
             ax.text(0.5, 0.5,
                     "No depolarization comparison available.\n"
                     "The prototype workbook needs a Depol_delta_v sheet and the\n"
@@ -8723,14 +8772,12 @@ class Step7Page(ctk.CTkFrame):
                     color=theme.TEXT_MUTED)
             ax.set_axis_off()
             return
-        lim = max(0.05, ax.get_xlim()[1], ax.get_ylim()[1])
-        ax.plot([0, lim], [0, lim], color=theme.TEXT_MUTED, lw=1, ls="--")
-        ax.set_xlabel("Mini-MPL δ  (converted: δ = d/(1−d))")
-        ax.set_ylabel("Prototype δ_v  (cross / co)")
-        ax.set_title("Volume depolarization, definitions aligned\n"
-                     "(dashed line = perfect agreement)", fontsize=10)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=9)
+        ax.set_ylabel("Volume depolarization ratio δ")
+        ax.set_title("Depolarization vs range — prototype (solid) vs Mini-MPL (dashed)\n"
+                     "MPL converted to the same definition: δ = d / (1 − d)", fontsize=10)
+        ax.set_ylim(bottom=0)
+        self._range_axis(ax)
+        ax.legend(fontsize=8)
 
     def _plot_summary(self):
         """Render the cross-case comparison as a table inside the figure."""
