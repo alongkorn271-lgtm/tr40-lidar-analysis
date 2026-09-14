@@ -50,9 +50,18 @@ COMPARE_RMAX_M = 5000.0
 COMPARE_SNR_MIN = 3.0
 # Nearest-time matching tolerance between a prototype and an MPL profile.
 MATCH_TOLERANCE_MIN = 5.0
-# Night is defined by local hour; the prototype folders mix day and night.
+# Fallback day/night split by local hour, used only when a workbook carries no
+# QC sheet to classify from the signal itself.
 NIGHT_START_HOUR = 18
 NIGHT_END_HOUR = 6
+# Profiles accumulated from fewer shots are aborted/partial acquisitions (the
+# short files at the start of a run) and are dropped before comparison.
+MIN_SHOTS = 1500
+# Signal-based day/night: a profile is DAY when its background is high, or when
+# the analog/photon glue could not be fitted (both are what sunlight does).
+# 10 MHz is the same threshold Step 2 uses to switch to its daytime glue.
+DAY_BG_THRESHOLD_MHZ = 10.0
+DAY_GLUE_R2_MIN = 0.75
 # Tolerance bands drawn on the relative-difference figure.
 TOLERANCE_BANDS_PCT = (10.0, 20.0)
 
@@ -97,6 +106,68 @@ def _first_sheet(xl: pd.ExcelFile, names: Tuple[str, ...]) -> Optional[Dict]:
     return None
 
 
+def _read_qc(xl: pd.ExcelFile) -> Dict:
+    """Per-profile QC from Step 2's ``QC_calibration`` sheet, keyed by time.
+
+    Returns {Timestamp: {'shots', 'bg_mhz', 'glue_r2'}}; values are NaN when a
+    column is absent (``shots`` only exists in workbooks written after it was
+    added to Step 2).
+    """
+    if "QC_calibration" not in xl.sheet_names:
+        return {}
+    q = xl.parse("QC_calibration")
+    if "time" not in q.columns:
+        return {}
+
+    def col(name):
+        return (pd.to_numeric(q[name], errors="coerce") if name in q.columns
+                else pd.Series(np.nan, index=q.index))
+
+    shots, bg, r2 = col("shots"), col("bg_par_mhz"), col("par_fit_quality_r2")
+    out = {}
+    for i, t in enumerate(pd.to_datetime(q["time"], errors="coerce")):
+        if pd.notna(t):
+            out[pd.Timestamp(t)] = {"shots": float(shots.iloc[i]),
+                                    "bg_mhz": float(bg.iloc[i]),
+                                    "glue_r2": float(r2.iloc[i])}
+    return out
+
+
+def _qc_for(qc: Dict, ts, tolerance_s: float = 90.0) -> Optional[Dict]:
+    """QC row for a profile time: exact match, else the nearest within tolerance."""
+    if not qc:
+        return None
+    t = pd.Timestamp(ts)
+    if t in qc:
+        return qc[t]
+    best = min(qc, key=lambda k: abs((k - t).total_seconds()))
+    return qc[best] if abs((best - t).total_seconds()) <= tolerance_s else None
+
+
+def classify_day_night(ts, qc_row: Optional[Dict],
+                       bg_threshold_mhz: float = DAY_BG_THRESHOLD_MHZ,
+                       glue_r2_min: float = DAY_GLUE_R2_MIN) -> Tuple[str, str]:
+    """('day' | 'night', reason) for one profile.
+
+    Decided from the signal when QC is available: day if the background is at
+    or above ``bg_threshold_mhz``, or if a glue fit exists and its r^2 is below
+    ``glue_r2_min``. The background carries most of the weight — it separates
+    night (~0.1 MHz) from day (60-250 MHz) by orders of magnitude, while a good
+    glue fit is still possible in the afternoon and a photon-only run has no
+    fit at all. Without QC the clock is used.
+    """
+    bg = qc_row.get("bg_mhz", np.nan) if qc_row else np.nan
+    r2 = qc_row.get("glue_r2", np.nan) if qc_row else np.nan
+    if np.isfinite(bg):
+        if bg >= bg_threshold_mhz:
+            return "day", f"BG {bg:.1f} MHz >= {bg_threshold_mhz:g}"
+        if np.isfinite(r2) and r2 < glue_r2_min:
+            return "day", f"glue r2 {r2:.2f} < {glue_r2_min:g}"
+        r2_txt = f"{r2:.2f}" if np.isfinite(r2) else "n/a"
+        return "night", f"BG {bg:.2f} MHz, glue r2 {r2_txt}"
+    return ("night" if is_night(ts) else "day"), "clock (no QC)"
+
+
 def load_prototype(path) -> Dict:
     """Load a prototype workbook (Step 2 NRB or the depolarization workbook).
 
@@ -118,6 +189,7 @@ def load_prototype(path) -> Dict:
         "snr": (_first_sheet(xl, ("SNR_co", "SNR")) or {}).get("cols", {}),
         "depol": depol.get("cols", {}),
         "depol_range_m": depol.get("range_m", nrb["range_m"]),
+        "qc": _read_qc(xl),
     }
 
 
@@ -320,6 +392,9 @@ def run_validation(
     snr_min: float = COMPARE_SNR_MIN,
     time_filter: str = "night",           # 'night' | 'day' | 'all'
     match_tolerance_min: float = MATCH_TOLERANCE_MIN,
+    min_shots: float = MIN_SHOTS,
+    day_bg_threshold_mhz: float = DAY_BG_THRESHOLD_MHZ,
+    day_glue_r2_min: float = DAY_GLUE_R2_MIN,
     logger: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, object]:
     """Validate one prototype case against the Mini-MPL reference.
@@ -349,11 +424,46 @@ def run_validation(
             f"(grid is {np.nanmin(r_grid):.0f}..{np.nanmax(r_grid):.0f} m).")
 
     tf = str(time_filter).strip().lower()
-    proto_ts = [t for t in sorted(proto["nrb"])
-                if tf == "all" or (is_night(t) if tf == "night" else not is_night(t))]
+    qc = proto.get("qc", {})
+    all_ts = sorted(proto["nrb"])
+
+    # 1) Drop aborted / partial acquisitions by shot count.
+    have_shots = any(np.isfinite(r.get("shots", np.nan)) for r in qc.values())
+    dropped_shots: List[str] = []
+    kept: List = []
+    for t in all_ts:
+        row = _qc_for(qc, t)
+        n = row.get("shots", np.nan) if row else np.nan
+        if have_shots and np.isfinite(n) and n < min_shots:
+            dropped_shots.append(f"{pd.Timestamp(t).strftime('%H:%M:%S')} ({int(n)} shots)")
+        else:
+            kept.append(t)
+    if not have_shots:
+        log(f"[{label}] shot filter unavailable — this workbook has no 'shots' "
+            f"column. Re-run Step 2 to enable it.")
+    elif dropped_shots:
+        log(f"[{label}] dropped {len(dropped_shots)} profile(s) with < "
+            f"{min_shots:g} shots: " + ", ".join(dropped_shots))
+    else:
+        log(f"[{label}] shot filter: every profile has >= {min_shots:g} shots")
+
+    # 2) Day / night from the signal (background + glue fit), clock as fallback.
+    day_night: Dict = {}
+    for t in kept:
+        day_night[t] = classify_day_night(t, _qc_for(qc, t),
+                                          day_bg_threshold_mhz, day_glue_r2_min)
+    basis = "signal (BG / glue r2)" if any(r != "clock (no QC)"
+                                          for _, r in day_night.values()) else "clock"
+    n_day = sum(1 for d, _ in day_night.values() if d == "day")
+    log(f"[{label}] day/night by {basis}: {len(kept) - n_day} night, {n_day} day")
+    for t in kept:
+        d, why = day_night[t]
+        log(f"    {pd.Timestamp(t).strftime('%H:%M:%S')}  {d:<5}  {why}")
+
+    proto_ts = [t for t in kept if tf == "all" or day_night[t][0] == tf]
     pairs = match_profiles(proto_ts, sorted(mpl["nrb"]), match_tolerance_min)
-    log(f"[{label}] {len(proto['nrb'])} prototype profile(s), "
-        f"{len(proto_ts)} after the '{tf}' filter, {len(pairs)} matched to MPL")
+    log(f"[{label}] {len(all_ts)} prototype profile(s), {len(kept)} after the shot "
+        f"filter, {len(proto_ts)} '{tf}', {len(pairs)} matched to MPL")
     if not pairs:
         raise ValueError(
             f"No prototype profile matched an MPL profile within "
@@ -386,8 +496,15 @@ def run_validation(
         ratio_cols[name] = res.pop("ratio_profile")
         proto_cols[name] = res.pop("proto_scaled_profile")
         mplnrb_cols[name] = res.pop("mpl_profile")
+        qrow = _qc_for(qc, p_ts) or {}
         rows.append({"Time": pd.Timestamp(p_ts), "MPL time": pd.Timestamp(m_ts),
-                     "dt (min)": round(dt_min, 1), **res})
+                     "dt (min)": round(dt_min, 1),
+                     "shots": qrow.get("shots", np.nan),
+                     "bg_par_mhz": qrow.get("bg_mhz", np.nan),
+                     "glue_r2": qrow.get("glue_r2", np.nan),
+                     "day_night": day_night[p_ts][0],
+                     "day_night_reason": day_night[p_ts][1],
+                     **res})
 
         # Depolarization: ours vs MPL, definitions aligned.
         if proto["depol"] and mpl["depol"] and p_ts in proto["depol"] and m_ts in mpl["depol"]:
@@ -449,6 +566,9 @@ def run_validation(
         "Window (m)": f"{rmin_m:.0f}-{rmax_m:.0f}",
         "Time filter": tf,
         "SNR min": snr_min,
+        "Min shots": min_shots,
+        "Profiles dropped (shots)": len(dropped_shots),
+        "Day/night basis": basis,
         "Profiles matched": len(per_profile),
         "Profiles valid": len(valid),
         "Bins per profile (median)": _med("n_bins"),

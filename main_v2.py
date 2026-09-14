@@ -8241,6 +8241,10 @@ class Step7Page(ctk.CTkFrame):
         self.snr_min = tk.DoubleVar(value=3.0)
         self.time_filter = tk.StringVar(value="night")
         self.match_tol_min = tk.DoubleVar(value=5.0)
+        # Profile filters: drop aborted short files; day/night from the signal.
+        self.min_shots = tk.DoubleVar(value=1500.0)
+        self.day_bg_mhz = tk.DoubleVar(value=10.0)
+        self.day_glue_r2 = tk.DoubleVar(value=0.75)
         self.plot_mode = tk.StringVar(value=VALIDATION_PLOT_MODES[0])
         self.progress = tk.DoubleVar(value=0.0)
 
@@ -8417,16 +8421,27 @@ class Step7Page(ctk.CTkFrame):
         ctk.CTkEntry(g, textvariable=self.match_tol_min, width=70,
                      **theme.input_style()).grid(row=0, column=3, sticky="w")
 
+        h = ctk.CTkFrame(body, fg_color="transparent")
+        h.grid(row=2, column=0, sticky="ew", pady=(4, 4))
+        for i in range(3):
+            h.grid_columnconfigure(i, weight=1)
+        FieldRow(h, "min shots", self.min_shots).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        FieldRow(h, "day if BG >= (MHz)", self.day_bg_mhz).grid(row=0, column=1, sticky="ew", padx=3)
+        FieldRow(h, "or glue r² <", self.day_glue_r2).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
         ctk.CTkLabel(
             body,
             text="Range is REAL range with the pre-trigger already removed, so the same "
-                 "window means the same altitude at 3.75 m and at 30 m. Above ~5 km is no "
-                 "longer boundary layer, and the Mini-MPL's own SNR seldom reaches past "
-                 "~4 km. Night is 18:00-06:00 local; each prototype profile is paired "
-                 "with the nearest MPL profile in time.",
+                 "window means the same altitude at 3.75 m and at 30 m. Profiles with fewer "
+                 "than 'min shots' are aborted acquisitions and are dropped. Day/night is "
+                 "decided from the signal: DAY when the background is at or above the BG "
+                 "threshold, or when the analog/photon glue fit has r² below the limit "
+                 "(the clock is used only if the workbook has no QC sheet). Each prototype "
+                 "profile is paired with the nearest MPL profile in time. The console lists "
+                 "every dropped file and the day/night reason for each profile.",
             font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
             wraplength=520, justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
         return card
 
     def _build_run_card(self, parent) -> "Card":
@@ -8583,6 +8598,9 @@ class Step7Page(ctk.CTkFrame):
                 snr_min=float(self.snr_min.get()),
                 time_filter=self.time_filter.get().strip().lower(),
                 match_tolerance_min=float(self.match_tol_min.get()),
+                min_shots=float(self.min_shots.get()),
+                day_bg_threshold_mhz=float(self.day_bg_mhz.get()),
+                day_glue_r2_min=float(self.day_glue_r2.get()),
             )
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return

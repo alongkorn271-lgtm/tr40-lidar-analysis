@@ -49,6 +49,7 @@ import pandas as pd
 
 from nrb_engine import (
     build_single_profile, snr_gate_nrb, snr_trusted_top, _looks_like_licel_binary,
+    read_shots,
 )
 
 # Molecular (Rayleigh) linear depolarization ratio at 532 nm.
@@ -799,7 +800,8 @@ def build_daily_depol_from_folders(
         except Exception as e:
             if strict:
                 raise
-            qc_rows.append({"key": key, "time": ts, "status": f"error: {e}"})
+            qc_rows.append({"key": key, "time": ts, "status": f"error: {e}",
+                            "shots": read_shots(co_path)})
             if logger:
                 logger(f"   error: {e}")
             if progress_cb:
@@ -843,6 +845,10 @@ def build_daily_depol_from_folders(
                       "auto_blend_ok", "toggle_mode", "glue_mode", "day_night_glue_pick")
         qc_rows.append({
             "key": key, "time": ts, "status": "ok",
+            # Shots in the file: lets later steps drop aborted short acquisitions.
+            "shots": read_shots(co_path),
+            **({"shots_cross": read_shots(cr_path)}
+               if single is None and not dual_channel_file and cr_path != co_path else {}),
             "C": meta["C"], "cal_ratio": meta["cal_ratio"], "n_cal": meta["n_cal"],
             "snr_min": meta.get("snr_min", snr_min),
             "n_delta_trusted": meta.get("n_delta_trusted", np.nan),

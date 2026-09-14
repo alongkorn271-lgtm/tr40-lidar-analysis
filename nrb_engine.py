@@ -158,6 +158,25 @@ def find_dat_data_start(lines: List[str]) -> int:
     return 9
 
 
+def read_shots(path) -> float:
+    """Laser shots accumulated in a Licel file, from its header only (NaN if unknown).
+
+    Line 3 of a Licel header starts with the shot count of laser 1 for both the
+    raw binary file and an Advanced Viewer ASCII export. Reading just the header
+    keeps this cheap enough to call once per profile. Very short files at the
+    start of a run (tens of shots, from an aborted acquisition) are otherwise
+    indistinguishable from a real profile once processed."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+        lines = head.splitlines()
+        if len(lines) < 3:
+            return float("nan")
+        return float(int(lines[2].split()[0]))
+    except (OSError, ValueError, IndexError):
+        return float("nan")
+
+
 def _looks_like_licel_binary(path: Path) -> bool:
     """Heuristic format detector: a Licel raw binary file has a non-text binary
     body (NUL bytes / many non-printable bytes), whereas an Advanced-Viewer ASCII
