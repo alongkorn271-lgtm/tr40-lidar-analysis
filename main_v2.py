@@ -2674,7 +2674,7 @@ class Step3Page(ctk.CTkFrame):
         # NRB-magnitude cloud cap = primary guard (catches water + ice clouds)
         cd_row0 = ctk.CTkFrame(body, fg_color="transparent")
         cd_row0.grid(row=9, column=0, sticky="ew", pady=(0, 2))
-        _add_cb(cd_row0, "Cap ALT search below NRB cloud (water+ice) — primary guard",
+        _add_cb(cd_row0, "Cap ALT search below the lowest cloud (detector v2: ≥4× signal jump)",
                 self.nrb_cloud_cap, side="left")
 
         # Enable + threshold row (shared NRB threshold for cap + detection)
@@ -2684,7 +2684,7 @@ class Step3Page(ctk.CTkFrame):
                 self.cloud_detect_enable, side="left")
         ctk.CTkEntry(cd_row1, textvariable=self.cloud_threshold, width=70,
                      **theme.input_style()).pack(side="left", padx=(8, 4))
-        ctk.CTkLabel(cd_row1, text="(normalized, 0.2-0.7)",
+        ctk.CTkLabel(cd_row1, text="(legacy detector only; v2 ignores it)",
                      font=theme.F_TINY, text_color=theme.TEXT_MUTED).pack(side="left")
 
         # Thickness + max layers row
@@ -2913,9 +2913,23 @@ class Step3Page(ctk.CTkFrame):
 
                 tmp_fd, tmp_path = tempfile.mkstemp(prefix="pbl_", suffix=".xlsx")
                 os.close(tmp_fd)
+                # Carry the SNR sheet across too: the engine reads --snr_sheet from
+                # this temp workbook, and without it the SNR cap silently disabled
+                # itself on every GUI run.
+                df_snr2 = None
+                try:
+                    if "SNR" in pd.ExcelFile(nrb).sheet_names:
+                        df_snr = pd.read_excel(nrb, sheet_name="SNR").dropna(how="all").dropna(axis=1, how="all")
+                        if list(df_snr.columns[1:]) == list(df_nrb.columns[1:]):
+                            df_snr2 = df_snr.copy()
+                            df_snr2.columns = new_cols
+                except Exception:
+                    df_snr2 = None
                 with pd.ExcelWriter(tmp_path, engine="openpyxl") as w:
                     df_nrb2.to_excel(w, sheet_name=PREF_NRB_SHEET, index=False)
                     df_map.to_excel(w, sheet_name=PREF_RMIN_SHEET, index=False)
+                    if df_snr2 is not None:
+                        df_snr2.to_excel(w, sheet_name="SNR", index=False)
 
                 cmd = [
                     sys.executable, engine, "--nrb", tmp_path, "--sheet", PREF_NRB_SHEET,
@@ -2931,6 +2945,7 @@ class Step3Page(ctk.CTkFrame):
                 except Exception:
                     cd_thr = 0.3
                 cap_on = bool(self.nrb_cloud_cap.get())
+                cmd += ["--cloud_cap_method", "v2"]
                 if cap_on:
                     cmd.append("--nrb_cloud_cap")
                 if bool(self.cloud_detect_enable.get()):

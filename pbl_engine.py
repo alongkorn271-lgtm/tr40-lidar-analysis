@@ -1041,6 +1041,14 @@ def main():
                     help="Cap the ALT search below the lowest ELEVATED NRB cloud "
                          "(catches water + ice clouds; primary cloud guard so ALT "
                          "is not mistaken for a cloud edge). Uses --cloud_threshold.")
+    ap.add_argument("--cloud_cap_method", choices=("v2", "legacy"), default="v2",
+                    help="Cloud detector behind --nrb_cloud_cap and --cloud_detect. "
+                         "v2 (default): layer_classifier.detect_clouds — a >=4x signal "
+                         "jump within 300 m with signal-derived SNR, works in daylight. "
+                         "legacy: normalised-NRB threshold (--cloud_threshold). On five "
+                         "independent days v2 gave 89 %% correct cloud/no-cloud calls vs "
+                         "78 %%, 3 false alarms vs 32, and ALT within 339 m of MPL at "
+                         "night (legacy cap: 434 m, on 60 of 106 profiles).")
     ap.add_argument("--nrb_cloud_surface_gap_m", type=float, default=150.0,
                     help="A high-NRB layer with base within this gap of the search "
                          "start is the surface BL (any depth), not a cloud (default 150 m)")
@@ -1211,13 +1219,23 @@ def main():
             #    ice-screen because rainy-season clouds are low-δ water clouds the
             #    δ screen misses; NRB magnitude catches both.
             if args.nrb_cloud_cap and _valid_window(prof_rmin, prof_rmax):
-                cbase = nrb_cloud_cap_base(
-                    r_m, ycol, prof_rmin, prof_rmax,
-                    float(args.cloud_threshold),
-                    surface_gap_m=float(args.nrb_cloud_surface_gap_m))
+                if args.cloud_cap_method == "v2":
+                    import layer_classifier as _lc
+                    cbase = None
+                    for _c in _lc.detect_clouds(r_m, ycol, None, max_range_m=prof_rmax):
+                        if _c["base_m"] > prof_rmin:
+                            cbase = _c["base_m"] - _lc.CLOUD_MARGIN_M
+                            break
+                    tag = "+cloudcap_v2"
+                else:
+                    cbase = nrb_cloud_cap_base(
+                        r_m, ycol, prof_rmin, prof_rmax,
+                        float(args.cloud_threshold),
+                        surface_gap_m=float(args.nrb_cloud_surface_gap_m))
+                    tag = "+nrb_cloudcap"
                 if cbase is not None and cbase > prof_rmin:
                     prof_rmax = min(prof_rmax, cbase)
-                    window_source = window_source + "+nrb_cloudcap"
+                    window_source = window_source + tag
 
             # ── Track 2: depol-based cloud screen — cap search below ice cloud ─
             delta_prof = None
@@ -1416,14 +1434,31 @@ def main():
         # ── Track 3: Cloud detection per profile ───────────────────────────
         if args.cloud_detect and nrb_ok:
             try:
-                layers = detect_cloud_layers(
-                    r_m, ycol,
-                    threshold=float(args.cloud_threshold),
-                    min_thickness_m=float(args.cloud_min_thickness_m),
-                    max_layers=int(args.cloud_max_layers),
-                    r_min_m=float(args.cloud_search_rmin),
-                    r_max_m=float(args.cloud_search_rmax),
-                )
+                if args.cloud_cap_method == "v2":
+                    # Same detector as the ALT cloud cap, so the listed clouds are
+                    # the ones that actually capped the search.
+                    import layer_classifier as _lc
+                    layers = []
+                    ys_ = np.asarray(ycol, float)
+                    for _c in _lc.detect_clouds(r_m, ycol, None, max_range_m=float(args.cloud_search_rmax)):
+                        if _c["base_m"] < float(args.cloud_search_rmin):
+                            continue
+                        ipk = int(np.argmin(np.abs(np.asarray(r_m, float) - _c["peak_m"])))
+                        layers.append({"base_m": _c["base_m"], "top_m": _c["top_m"],
+                                       "peak_R_m": _c["peak_m"], "peak_value": float(ys_[ipk]),
+                                       "thickness_m": _c["top_m"] - _c["base_m"],
+                                       "rough_OD": float("nan")})
+                        if len(layers) >= int(args.cloud_max_layers):
+                            break
+                else:
+                    layers = detect_cloud_layers(
+                        r_m, ycol,
+                        threshold=float(args.cloud_threshold),
+                        min_thickness_m=float(args.cloud_min_thickness_m),
+                        max_layers=int(args.cloud_max_layers),
+                        r_min_m=float(args.cloud_search_rmin),
+                        r_max_m=float(args.cloud_search_rmax),
+                    )
             except Exception:
                 layers = []
             # Annotate ALT row with cloud summary
