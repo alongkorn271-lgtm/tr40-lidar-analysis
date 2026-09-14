@@ -61,6 +61,8 @@ SEARCH_TOP_M = 5000.0        # boundary layer interest ends here
 TOP_HALF_WINDOW_M = 250.0    # half-window of the above/below means
 TOP_MIN_DROP = 0.25          # >= 25 % relative fall marks a layer top
 CLOUD_MARGIN_M = 60.0        # ALT search stops this far below a cloud base
+NOISE_WINDOW_M = 300.0       # window for the signal-derived noise estimate
+NEAR_GUARD_M = 100.0         # a cloud base must sit this far above the first valid bin
 
 
 def _bins(length_m: float, dr: float) -> int:
@@ -71,6 +73,32 @@ def _running(y: np.ndarray, n: int, how: str = "median") -> np.ndarray:
     s = pd.Series(y)
     roll = s.rolling(n, center=True, min_periods=max(1, n // 2))
     return (roll.median() if how == "median" else roll.mean()).to_numpy(float)
+
+
+def signal_snr(r_m, nrb) -> np.ndarray:
+    """SNR of the smoothed signal, estimated from the signal itself.
+
+    The photon-channel SNR is unusable in daylight: the solar background drives
+    the photon counter into saturation and the profile is carried by the analog
+    channel, so the recorded SNR reads ~0 even where a cloud is obvious. Here the
+    noise is the robust scatter (MAD) of bin-to-bin differences in a local window,
+    divided by sqrt(2), so the estimate works for analog, photon or glued signal
+    alike. (Residuals from a short running median are unusable: with a 3-bin
+    median at 30 m half of them are exactly zero and the MAD collapses to 0.)
+    Bins without a usable noise estimate get NaN, i.e. they never pass an SNR test.
+    """
+    r = np.asarray(r_m, float)
+    y = np.asarray(nrb, float)
+    dr = float(np.nanmedian(np.diff(r)))
+    n = _bins(SMOOTH_M, dr)
+    ys = _running(np.where(np.isfinite(y), y, np.nan), n)
+    w = max(7, _bins(NOISE_WINDOW_M, dr))
+    dif = np.abs(np.diff(y, prepend=np.nan))
+    roll = pd.Series(dif).rolling(w, center=True, min_periods=max(4, w // 3))
+    sig = roll.median().to_numpy(float) * 1.4826 / np.sqrt(2.0)
+    sig = np.where(np.isfinite(sig) & (sig > 0), sig, np.nan)
+    with np.errstate(all="ignore"):
+        return ys / (sig / np.sqrt(n))
 
 
 def _snr_top(r: np.ndarray, snr: np.ndarray, snr_min: float, dr: float) -> float:
@@ -87,19 +115,23 @@ def _snr_top(r: np.ndarray, snr: np.ndarray, snr_min: float, dr: float) -> float
     return top
 
 
-def detect_clouds(r_m, nrb, snr, delta=None, *, max_range_m: Optional[float] = None
+def detect_clouds(r_m, nrb, snr=None, delta=None, *, max_range_m: Optional[float] = None
                   ) -> List[Dict[str, float]]:
     """Clouds in one profile, lowest first.
+
+    ``snr=None`` (recommended) uses :func:`signal_snr`, which also works in
+    daylight; pass a photon SNR profile only to reproduce the first version.
 
     Each item: base_m, peak_m, top_m, peak_ratio, delta_median, phase
     ('ice' | 'water' | 'unknown'), opaque (bool).
     """
     r = np.asarray(r_m, float)
     y = np.asarray(nrb, float)
-    s = np.asarray(snr, float)
+    s = signal_snr(r, y) if snr is None else np.asarray(snr, float)
     d = np.asarray(delta, float) if delta is not None else np.full(r.shape, np.nan)
-    if r.size < 10:
+    if r.size < 10 or not np.isfinite(y).any():
         return []
+    first_valid = float(r[np.isfinite(y)][0])
     dr = float(np.nanmedian(np.diff(r)))
     ys = _running(np.where(np.isfinite(y), y, np.nan), _bins(SMOOTH_M, dr))
     ss = _running(np.where(np.isfinite(s), s, np.nan), _bins(SMOOTH_M, dr))
@@ -112,7 +144,9 @@ def detect_clouds(r_m, nrb, snr, delta=None, *, max_range_m: Optional[float] = N
     while i < r.size - n_up and r[i] <= top_limit:
         below = ys[max(0, i - n_dn):i]
         below = below[np.isfinite(below) & (below > 0)]
-        if below.size == 0:
+        # Near the start of valid data the "level below" is the overlap edge, not
+        # clear air: a jump there is the data starting, not a cloud base.
+        if below.size < 0.8 * n_dn or r[i] - CLOUD_BELOW_M < first_valid + NEAR_GUARD_M:
             i += 1
             continue
         level = float(np.median(below))
