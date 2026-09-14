@@ -628,6 +628,75 @@ def select_toggle_rates(
 # Glue / NRB
 # -----------------------------------------------------------------------------
 
+# ---- Robust analog->photon gain for the glue -----------------------------------
+# The analog and photon channels see the same light, so after each one's own
+# background is removed their ratio is a constant of the instrument (measured on
+# 2026-09-08 night: ~86 MHz/mV parallel, ~95 MHz/mV perpendicular, the same in
+# every profile and at every rate in the toggle window). A least-squares line
+# with a free offset over "every bin whose photon rate is 2-10 MHz" was being
+# dragged far from that constant by two kinds of bin the rate window lets in:
+#   * bins inside a cloud, where the photon counter piles up even after the
+#     dead-time correction (per-bin gain 16-62 instead of ~95), and
+#   * far bins where the analog is only a few times its noise, which biases an
+#     ordinary regression slope toward zero (regression dilution).
+# Cross-channel slopes of 30, 73 and 39 MHz/mV on three of seven nights made the
+# near-field perpendicular signal, and so delta_v, 1.3-3x too low.
+GLUE_ANALOG_SNR_MIN = 5.0        # analog above background >= 5x its per-bin noise
+GLUE_MAD_REJECT = 3.0            # drop per-bin gains beyond 3 robust sigmas
+GLUE_ROBUST_MIN_BINS = 20        # fewer clean bins -> least squares, flagged, and the
+                                 # daily builder replaces it with the night's gain
+GLUE_GAIN_TOLERANCE = 0.15       # a profile gain this far from the night's is replaced
+
+
+def robust_glue_gain(
+    analog_raw: np.ndarray,
+    photon_dt_mhz: np.ndarray,
+    candidate_mask: np.ndarray,
+    *,
+    bg_analog_mv: float,
+    bg_photon_mhz: float,
+    analog_noise_mv: float,
+) -> Dict[str, float]:
+    """Median per-bin photon/analog gain over clean bins.
+
+    Keeps candidate bins whose background-subtracted analog is at least
+    GLUE_ANALOG_SNR_MIN times the analog noise, rejects gains more than
+    GLUE_MAD_REJECT robust sigmas from the median, and returns the median of the
+    rest. The offset follows from the backgrounds: o = bgP - s * bgA, so the
+    scaled analog passes through the photon background exactly.
+
+    Returns slope, offset, r2, rmse, n (bins used; 0 when not enough).
+    """
+    a = np.asarray(analog_raw, float)
+    y = np.asarray(photon_dt_mhz, float)
+    out = {"slope": np.nan, "offset": np.nan, "r2": np.nan, "rmse": np.nan, "n": 0}
+    if not (np.isfinite(bg_analog_mv) and np.isfinite(bg_photon_mhz)):
+        return out
+    noise = analog_noise_mv if (np.isfinite(analog_noise_mv) and analog_noise_mv > 0) else 0.0
+    xa = a - bg_analog_mv
+    ya = y - bg_photon_mhz
+    keep = (np.asarray(candidate_mask, bool) & np.isfinite(xa) & np.isfinite(ya)
+            & (xa > max(GLUE_ANALOG_SNR_MIN * noise, 0.0)))
+    if int(keep.sum()) < GLUE_ROBUST_MIN_BINS:
+        return out
+    g = ya[keep] / xa[keep]
+    med = float(np.median(g))
+    mad = float(np.median(np.abs(g - med))) * 1.4826
+    good = np.abs(g - med) <= GLUE_MAD_REJECT * mad if mad > 0 else np.ones(g.size, bool)
+    if int(good.sum()) < GLUE_ROBUST_MIN_BINS:
+        return out
+    slope = float(np.median(g[good]))
+    offset = float(bg_photon_mhz - slope * bg_analog_mv)
+    idx = np.where(keep)[0][good]
+    yhat = slope * a[idx] + offset
+    ss_res = float(np.sum((y[idx] - yhat) ** 2))
+    ss_tot = float(np.sum((y[idx] - np.mean(y[idx])) ** 2))
+    r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+    out.update(slope=slope, offset=offset, r2=r2,
+               rmse=float(np.sqrt(ss_res / idx.size)), n=int(idx.size))
+    return out
+
+
 def compute_nrb_reference_glue(
     r_m: np.ndarray,
     analog_raw: np.ndarray,
@@ -658,6 +727,10 @@ def compute_nrb_reference_glue(
     afterpulse_A_R: Optional[np.ndarray] = None,
     saturation_mask: Optional[np.ndarray] = None,
     exclude_saturated: bool = False,
+    glue_fit: str = "robust",
+    bg_pretrigger_analog_mv: float = np.nan,
+    analog_noise_mv: float = np.nan,
+    glue_gain_override: Optional[float] = None,
 ) -> Tuple[np.ndarray, Dict[str, float], Dict[str, np.ndarray]]:
     r = np.asarray(r_m, float)
     analog_raw = np.asarray(analog_raw, float)
@@ -734,11 +807,52 @@ def compute_nrb_reference_glue(
         )
         n_fit = int(np.sum(fit_mask))
 
-        if n_fit >= 2:
+        # Robust gain first (see robust_glue_gain); widen the rate window if the
+        # standard one holds too few clean bins; ordinary least squares last.
+        robust_done = False
+        if (glue_gain_override is not None and np.isfinite(glue_gain_override)
+                and glue_gain_override > 0 and np.isfinite(bg_pretrigger_analog_mv)):
+            # Gain supplied by the caller (the night's instrument gain).
+            slope = float(glue_gain_override)
+            offset = float(bg_pretrigger_photon_mhz) - slope * float(bg_pretrigger_analog_mv)
+            analog_scaled = slope * analog_raw + offset
+            if n_fit >= 2:
+                yh = slope * analog_raw[fit_mask] + offset
+                yy = photon_dt_mhz[fit_mask]
+                ss_res = float(np.sum((yy - yh) ** 2))
+                ss_tot = float(np.sum((yy - np.mean(yy)) ** 2))
+                fit_quality_r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+                fit_rmse = float(np.sqrt(ss_res / n_fit))
+            fit_mode = "night_gain_override"
+            robust_done = True
+        elif str(glue_fit).strip().lower() == "robust":
+            bg_p_for_gain = float(bg_pretrigger_photon_mhz)
+            for mode_name, hi_rate in (("robust_median_gain", float(max_toggle_rate)),):
+                cand = (sig_mask & np.isfinite(photon_toggle) & (~sat)
+                        & (photon_toggle >= float(min_toggle_rate))
+                        & (photon_toggle <= hi_rate))
+                rg = robust_glue_gain(
+                    analog_raw, photon_dt_mhz, cand,
+                    bg_analog_mv=float(bg_pretrigger_analog_mv),
+                    bg_photon_mhz=bg_p_for_gain,
+                    analog_noise_mv=float(analog_noise_mv))
+                if rg["n"] >= GLUE_ROBUST_MIN_BINS and np.isfinite(rg["slope"]) and rg["slope"] > 0:
+                    slope, offset = rg["slope"], rg["offset"]
+                    fit_quality_r2, fit_rmse, n_fit = rg["r2"], rg["rmse"], rg["n"]
+                    analog_scaled = slope * analog_raw + offset
+                    fit_mode = mode_name
+                    robust_done = True
+                    break
+
+        if robust_done:
+            pass
+        elif n_fit >= 2:
             slope, offset, fit_quality_r2, fit_rmse, _ = linear_regression_stats(
                 analog_raw[fit_mask], photon_dt_mhz[fit_mask]
             )
             analog_scaled = slope * analog_raw + offset
+            if str(glue_fit).strip().lower() == "robust":
+                fit_mode = "ols_fallback"
         else:
             fallback_mask = sig_mask & np.isfinite(analog_raw) & np.isfinite(photon_dt_mhz) & (~sat)
             if int(np.sum(fallback_mask)) >= 2:
@@ -851,6 +965,7 @@ def compute_nrb_reference_glue(
         "fit_quality_r2": float(fit_quality_r2) if np.isfinite(fit_quality_r2) else np.nan,
         "fit_rmse": float(fit_rmse) if np.isfinite(fit_rmse) else np.nan,
         "n_toggle_points": float(n_fit),
+        "glue_fit_mode": fit_mode,
         "bg_glued": float(bg_glued),
         "energy_mj": float(energy_mj),
         "sig_start_m": float(sig_start_m),
@@ -962,6 +1077,8 @@ def build_single_profile(
     afterpulse_A_R: Optional[np.ndarray] = None,
     channel: str = "parallel",
     exclude_saturated: bool = False,
+    glue_fit: str = "robust",
+    glue_gain_override: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     raw_df = read_tr40_dat_ascii(
         path,
@@ -993,11 +1110,18 @@ def build_single_profile(
         )
 
     ray_fit_info: Dict[str, float] = {}
+    # Analog background / noise for the robust glue gain; the Rayleigh-fit mode
+    # has no analog background, so the glue falls back to least squares there.
+    bg_pre_analog_mv = np.nan
+    analog_noise_mv = np.nan
     if bg_mode_l == "pretrigger":
         if int(pretrigger_bins) <= 0:
             raise ValueError("bg_mode='pretrigger' requires pretrigger_bins > 0.")
         _bg_a_pre, bg_p_pre_mhz = extract_pretrigger_background(
             path, pretrigger_bins=pretrigger_bins, channel=channel)
+        bg_a_pre_trim = trim_pretrigger_tail(np.asarray(_bg_a_pre, float), pretrigger_trim_bins)
+        bg_pre_analog_mv = float(np.nanmean(bg_a_pre_trim)) if np.size(bg_a_pre_trim) else np.nan
+        analog_noise_mv = float(np.nanstd(bg_a_pre_trim)) if np.size(bg_a_pre_trim) > 1 else np.nan
         bg_p_pre_trim_mhz = trim_pretrigger_tail(bg_p_pre_mhz, pretrigger_trim_bins)
         bg_pre_photon_dt = float(np.nanmean(dead_time_correct_mhz(bg_p_pre_trim_mhz, dead_time_ns)))
         bg_window_start_m_used = 0.0
@@ -1035,6 +1159,8 @@ def build_single_profile(
                 f"bg_mode={bg_mode_l!r}: no valid bins in BG window [{bg_lo:.1f}, {bg_hi:.1f}] m."
             )
         bg_pre_photon_dt = float(np.nanmean(dead_time_correct_mhz(photon[bg_mask], dead_time_ns)))
+        bg_pre_analog_mv = float(np.nanmean(analog[bg_mask]))
+        analog_noise_mv = float(np.nanstd(analog[bg_mask]))
         bg_window_start_m_used = bg_lo
         bg_window_end_m_used = bg_hi
     toggle_sel = select_toggle_rates(
@@ -1095,6 +1221,10 @@ def build_single_profile(
         afterpulse_A_R=afterpulse_A_R,
         saturation_mask=saturation_mask,
         exclude_saturated=exclude_saturated,
+        glue_fit=glue_fit,
+        bg_pretrigger_analog_mv=bg_pre_analog_mv,
+        analog_noise_mv=analog_noise_mv,
+        glue_gain_override=glue_gain_override,
     )
 
     out = raw_df[["range_m", "source_bin_index", "analog_mV", "photon_MHz"]].copy()
@@ -1177,6 +1307,7 @@ def build_single_profile(
         "fit_quality_r2": float(qc["fit_quality_r2"]),
         "fit_rmse": float(qc["fit_rmse"]),
         "n_toggle_points": int(round(qc["n_toggle_points"])),
+        "glue_fit_mode": str(qc.get("glue_fit_mode", "")),
         "bg_glued": float(qc["bg_glued"]),
         "energy_mj": float(energy_mj),
         "auto_blend": bool(auto_blend),

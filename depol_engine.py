@@ -49,7 +49,7 @@ import pandas as pd
 
 from nrb_engine import (
     build_single_profile, snr_gate_nrb, snr_trusted_top, _looks_like_licel_binary,
-    read_shots,
+    read_shots, GLUE_GAIN_TOLERANCE,
 )
 
 # Molecular (Rayleigh) linear depolarization ratio at 532 nm.
@@ -401,7 +401,7 @@ def _glue_qc(prof_meta: Dict[str, object], prefix: str) -> Dict[str, object]:
     (mirrors the Step-2 NRB QC: blend_r1/r2_used_m, slope, offset, fit_quality_r2,
     n_toggle_points, glue_mode)."""
     keys = ("blend_r1_used_m", "blend_r2_used_m", "slope", "offset",
-            "fit_quality_r2", "fit_rmse", "n_toggle_points",
+            "fit_quality_r2", "fit_rmse", "n_toggle_points", "glue_fit_mode",
             "auto_blend_ok", "toggle_mode", "glue_mode",
             "day_night_glue_pick")
     return {f"{prefix}_{k}": prof_meta.get(k) for k in keys}
@@ -440,10 +440,16 @@ def build_depol_for_pair(
     snr_gate: bool = True,
     co_channel: str = "parallel",
     cross_channel: str = "parallel",
+    glue_gain_co: Optional[float] = None,
+    glue_gain_cross: Optional[float] = None,
     **nrb_kwargs,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """
     Process one co/cross pair into a depolarization profile DataFrame.
+
+    ``glue_gain_co`` / ``glue_gain_cross`` force the analog->photon gain of that
+    channel (used by the daily builder to give a cloud-contaminated profile the
+    night's gain).
 
     `nrb_kwargs` are forwarded identically to build_single_profile for BOTH
     channels (overlap_O_R, energy_mj, etc. are SHARED — same telescope/shot).
@@ -468,9 +474,11 @@ def build_depol_for_pair(
     # co_channel="parallel", cross_channel="perpendicular".
     nrb_kwargs.pop("channel", None)
     co_df, co_meta = build_single_profile(
-        Path(co_path), afterpulse_A_R=afterpulse_co, channel=co_channel, **nrb_kwargs)
+        Path(co_path), afterpulse_A_R=afterpulse_co, channel=co_channel,
+        glue_gain_override=glue_gain_co, **nrb_kwargs)
     cr_df, cr_meta = build_single_profile(
-        Path(cross_path), afterpulse_A_R=afterpulse_cross, channel=cross_channel, **nrb_kwargs)
+        Path(cross_path), afterpulse_A_R=afterpulse_cross, channel=cross_channel,
+        glue_gain_override=glue_gain_cross, **nrb_kwargs)
 
     r = co_df["range_m"].to_numpy(float)
     r_cr = cr_df["range_m"].to_numpy(float)
@@ -775,6 +783,25 @@ def build_daily_depol_from_folders(
     qc_rows: List[Dict[str, object]] = []
     total = len(pairs)
 
+    def _process(ts, co_path, cr_path, gain_co=None, gain_cross=None):
+        if single is not None:
+            return build_single_channel_for_file(
+                co_path, single,
+                afterpulse=(afterpulse_co if single == "par" else afterpulse_cross),
+                snr_min=snr_min, snr_gate=snr_gate, **nrb_kwargs)
+        return build_depol_for_pair(
+            co_path, cr_path,
+            delta_mol=delta_mol, cal_rmin_m=cal_rmin_m, cal_rmax_m=cal_rmax_m,
+            afterpulse_co=afterpulse_co, afterpulse_cross=afterpulse_cross,
+            snr_min=snr_min, snr_gate=snr_gate,
+            co_channel="parallel",
+            cross_channel="perpendicular" if dual_channel_file else "parallel",
+            glue_gain_co=gain_co, glue_gain_cross=gain_cross,
+            **nrb_kwargs,
+        )
+
+    # Pass 1: every pair with its own glue fit.
+    processed = []
     for idx, (ts, co_path, cr_path, key) in enumerate(pairs, start=1):
         if logger:
             if single is not None:
@@ -782,30 +809,63 @@ def build_daily_depol_from_folders(
             else:
                 logger(f"[{idx}/{total}] {key}  (co={co_path.name}, cross={cr_path.name})")
         try:
-            if single is not None:
-                df, meta = build_single_channel_for_file(
-                    co_path, single,
-                    afterpulse=(afterpulse_co if single == "par" else afterpulse_cross),
-                    snr_min=snr_min, snr_gate=snr_gate, **nrb_kwargs)
-            else:
-                df, meta = build_depol_for_pair(
-                    co_path, cr_path,
-                    delta_mol=delta_mol, cal_rmin_m=cal_rmin_m, cal_rmax_m=cal_rmax_m,
-                    afterpulse_co=afterpulse_co, afterpulse_cross=afterpulse_cross,
-                    snr_min=snr_min, snr_gate=snr_gate,
-                    co_channel="parallel",
-                    cross_channel="perpendicular" if dual_channel_file else "parallel",
-                    **nrb_kwargs,
-                )
+            df, meta = _process(ts, co_path, cr_path)
+            processed.append((ts, co_path, cr_path, key, df, meta, None))
         except Exception as e:
             if strict:
                 raise
-            qc_rows.append({"key": key, "time": ts, "status": f"error: {e}",
-                            "shots": read_shots(co_path)})
+            processed.append((ts, co_path, cr_path, key, None, None, e))
             if logger:
                 logger(f"   error: {e}")
-            if progress_cb:
-                progress_cb(100.0 * idx / total)
+        if progress_cb:
+            progress_cb(90.0 * idx / total)
+
+    # Pass 2: the analog->photon gain is a property of the instrument, so a night
+    # profile whose own fit had too few clean bins (cloud) or strays from the
+    # night's gain is re-run with the night's gain (median of the clean fits).
+    if single is None and str(nrb_kwargs.get("glue_fit", "robust")).lower() == "robust":
+        ref = {}
+        for pref in ("par", "perp"):
+            g = [m.get(f"{pref}_slope") for (_, _, _, _, d, m, err) in processed
+                 if err is None and m.get(f"{pref}_glue_fit_mode") == "robust_median_gain"
+                 and m.get(f"{pref}_day_night_glue_pick", "night_glue") != "day_glue_bgsub"
+                 and np.isfinite(m.get(f"{pref}_slope", np.nan))]
+            ref[pref] = float(np.median(g)) if len(g) >= 2 else np.nan
+        if logger:
+            logger(f"night glue gain: parallel {ref['par']:.2f}, "
+                   f"perpendicular {ref['perp']:.2f} MHz/mV")
+        for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
+            if err is not None:
+                continue
+            force = {}
+            for pref in ("par", "perp"):
+                if (not np.isfinite(ref[pref])
+                        or meta.get(f"{pref}_day_night_glue_pick", "night_glue") == "day_glue_bgsub"
+                        or str(meta.get(f"{pref}_glue_mode", "")).startswith("photon_only")):
+                    continue
+                sl = meta.get(f"{pref}_slope", np.nan)
+                bad_mode = meta.get(f"{pref}_glue_fit_mode") != "robust_median_gain"
+                stray = (not np.isfinite(sl)) or abs(sl - ref[pref]) > GLUE_GAIN_TOLERANCE * ref[pref]
+                if bad_mode or stray:
+                    force[pref] = ref[pref]
+            if not force:
+                continue
+            try:
+                df2, meta2 = _process(ts, co_path, cr_path,
+                                      gain_co=force.get("par"), gain_cross=force.get("perp"))
+                processed[i] = (ts, co_path, cr_path, key, df2, meta2, None)
+                if logger:
+                    logger(f"   {key}: glue gain replaced by the night's gain for "
+                           + ", ".join(f"{p_} (was {meta.get(p_ + '_slope', float('nan')):.1f})"
+                                       for p_ in force))
+            except Exception as e:
+                if logger:
+                    logger(f"   {key}: night-gain rerun failed ({e}); keeping its own fit")
+
+    for idx, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed, start=1):
+        if err is not None:
+            qc_rows.append({"key": key, "time": ts, "status": f"error: {err}",
+                            "shots": read_shots(co_path)})
             continue
 
         r = df["range_m"].to_numpy(float)
@@ -841,7 +901,7 @@ def build_daily_depol_from_folders(
         snr_co_cols.append(sco.astype(float))
         snr_cr_cols.append(scr.astype(float))
         _glue_keys = ("blend_r1_used_m", "blend_r2_used_m", "slope", "offset",
-                      "fit_quality_r2", "fit_rmse", "n_toggle_points",
+                      "fit_quality_r2", "fit_rmse", "n_toggle_points", "glue_fit_mode",
                       "auto_blend_ok", "toggle_mode", "glue_mode", "day_night_glue_pick")
         qc_rows.append({
             "key": key, "time": ts, "status": "ok",
@@ -858,8 +918,8 @@ def build_daily_depol_from_folders(
             **{f"par_{k}": meta.get(f"par_{k}") for k in _glue_keys},
             **{f"perp_{k}": meta.get(f"perp_{k}") for k in _glue_keys},
         })
-        if progress_cb:
-            progress_cb(100.0 * idx / total)
+    if progress_cb:
+        progress_cb(100.0)
 
     if ref_r is None or not ts_list:
         raise ValueError("No valid profiles processed."

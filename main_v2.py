@@ -6853,6 +6853,10 @@ class Step6Page(ctk.CTkFrame):
         # valid, and the only way to get a usable SNR on the affected ones.
         # Untick to see exactly what the Advanced Viewer shows, corruption included.
         self.poisson_stderr = tk.BooleanVar(value=True)
+        # Robust glue gain: median per-bin analog->photon gain over clean bins
+        # instead of a least-squares line that cloud and noise-level bins drag
+        # down. Default ON; untick for the legacy fit.
+        self.robust_glue = tk.BooleanVar(value=True)
         # Corrections (so per-channel NRB is fully comparable to MPL / Step 2)
         self.energy_mj    = tk.DoubleVar(value=25.0)
         # Overlap ON by default (analytical NARIT geometry), matching the NRB page.
@@ -7267,6 +7271,19 @@ class Step6Page(ctk.CTkFrame):
             font=theme.F_TINY, text_color=theme.TEXT_MUTED,
             justify="left", wraplength=760,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        cb(f, "Robust glue gain (median analog→photon gain; ignores cloud and noise-level bins)",
+           self.robust_glue, row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(
+            f,
+            text="The analog→photon gain is a constant of the instrument (~86 MHz/mV ∥, ~95 MHz/mV ⊥ "
+                 "on 2026-09-08). A least-squares line over every bin in the toggle window was pulled "
+                 "down by bins inside clouds (photon pile-up) and far bins where the analog is near its "
+                 "noise, giving ⊥ gains of 30-73 on some profiles and a δ 1.3-3× too low. Ticked, the "
+                 "gain is the median of clean per-bin gains. Untick for the legacy least-squares fit. "
+                 "QC_calibration shows which fit each profile used (par/perp_glue_fit_mode).",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED,
+            justify="left", wraplength=760,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         # ── 6. Depolarization calibration (last: needs the finished NRB) ───
         sub("6 · Depolarization calibration")
@@ -7656,6 +7673,7 @@ class Step6Page(ctk.CTkFrame):
                 "auto_blend": bool(self.auto_blend.get()),
                 "sig_start_m": float(self.sig_start_m.get()),
                 "sig_end_m": float(self.sig_end_m.get()),
+                "glue_fit": "robust" if bool(self.robust_glue.get()) else "ols",
             }
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return
@@ -7755,6 +7773,7 @@ class Step6Page(ctk.CTkFrame):
                     blend_r1_m=raw_p["blend_r1_m"], blend_r2_m=raw_p["blend_r2_m"],
                     auto_blend=raw_p["auto_blend"],
                     sig_start_m=raw_p["sig_start_m"], sig_end_m=raw_p["sig_end_m"],
+                    glue_fit=raw_p["glue_fit"],
                     strict=False, logger=self._safe_log, progress_cb=progress_cb,
                 )
                 dv = res["delta_v"]
