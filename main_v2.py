@@ -8250,6 +8250,9 @@ VALIDATION_VIEW_HELP = {
 # One colour per case slot, reused across every figure so a case keeps its
 # identity when the plot mode changes.
 _VAL_CASE_COLORS = ("#E8743B", "#1F4E79")
+# One colour per individually selected profile (solid = prototype, dashed = MPL).
+_VAL_PROFILE_COLORS = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
+                       "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f")
 
 
 class Step7Page(ctk.CTkFrame):
@@ -8531,12 +8534,47 @@ class Step7Page(ctk.CTkFrame):
             body, text="", font=theme.F_SMALL, text_color=theme.TEXT_SECONDARY,
             anchor="w", justify="left", wraplength=760)
         self._view_help.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+
+        # Profile-time selector, like Step 5: nothing selected = the median of
+        # every matched profile; select times to see those profiles one by one.
+        sel_row = ctk.CTkFrame(body, fg_color="transparent")
+        sel_row.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        sel_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(sel_row, text="Profile time (none selected = median of all matched profiles):",
+                     font=theme.F_SMALL, text_color=theme.TEXT_SECONDARY,
+                     anchor="w").grid(row=0, column=0, sticky="w")
+        list_wrap = ctk.CTkFrame(sel_row, fg_color=theme.CREAM_SOFT,
+                                 corner_radius=theme.RADIUS_INPUT, border_width=1,
+                                 border_color=theme.BORDER, height=110)
+        list_wrap.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        list_wrap.grid_columnconfigure(0, weight=1)
+        list_wrap.grid_rowconfigure(0, weight=1)
+        list_wrap.grid_propagate(False)
+        self.time_list = tk.Listbox(
+            list_wrap, selectmode="extended", exportselection=False, height=5,
+            bg=theme.CREAM_SOFT, fg=theme.TEXT_PRIMARY,
+            selectbackground=theme.ORANGE_SOFT, selectforeground=theme.ORANGE,
+            relief="flat", borderwidth=0, highlightthickness=0, font=(theme.FONT_FAMILY, 11),
+        )
+        self.time_list.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.time_list.bind("<<ListboxSelect>>", lambda _e: self.refresh_plot())
+        btns = ctk.CTkFrame(list_wrap, fg_color="transparent")
+        btns.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        ctk.CTkButton(btns, text="Select All",
+                      command=lambda: (self.time_list.selection_set(0, "end"), self.refresh_plot()),
+                      **theme.ghost_button_style(width=90, height=28)).pack(pady=(0, 4))
+        ctk.CTkButton(btns, text="Median",
+                      command=lambda: (self.time_list.selection_clear(0, "end"), self.refresh_plot()),
+                      **theme.ghost_button_style(width=90, height=28)).pack()
+        self._time_keys = []
+
         body.grid_rowconfigure(1, weight=0)
-        body.grid_rowconfigure(2, weight=1)
+        body.grid_rowconfigure(2, weight=0)
+        body.grid_rowconfigure(3, weight=1)
 
         wrap = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=theme.RADIUS_INPUT,
                             border_width=1, border_color=theme.BORDER)
-        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.grid(row=3, column=0, sticky="nsew")
         wrap.grid_columnconfigure(0, weight=1)
         wrap.grid_rowconfigure(0, weight=1)
         self.fig = plt.Figure(figsize=(7, 5.6), dpi=100, facecolor=theme.CARD_BG)
@@ -8550,7 +8588,35 @@ class Step7Page(ctk.CTkFrame):
 
     def _update_view_help(self):
         key = self.plot_mode.get().strip()[:1]
-        self._view_help.configure(text=VALIDATION_VIEW_HELP.get(key, ""))
+        mode = ("แสดง profile ที่เลือก" if getattr(self, "time_list", None) is not None
+                and self.time_list.curselection() else "แสดงค่ามัธยฐานของทุก profile (เลือกเวลาในรายการเพื่อดูแยก)")
+        self._view_help.configure(text=VALIDATION_VIEW_HELP.get(key, "") + f"\n▶ {mode}")
+
+    def _populate_times(self):
+        """Fill the time list with every matched profile of every case."""
+        self._time_keys = []
+        self.time_list.delete(0, "end")
+        multi = len(self._results) > 1
+        for ci, res in enumerate(self._results):
+            pp = res["per_profile"]
+            for _, row in pp.sort_values("Time").iterrows():
+                t = pd.Timestamp(row["Time"])
+                name = t.strftime("%H:%M")
+                w20 = row.get("within_20pct", np.nan)
+                dn = row.get("day_night", "")
+                tail = f"  ±20 %: {w20:.0f}" if np.isfinite(w20) else "  (no valid bins)"
+                text = (f"{res['label']} · " if multi else "") + f"{name}  {dn}{tail}"
+                self._time_keys.append((ci, name, t))
+                self.time_list.insert("end", text)
+
+    def _selected(self):
+        """[(case index, HH:MM column, Timestamp)] for the selected list rows."""
+        if not getattr(self, "_time_keys", None):
+            return []
+        return [self._time_keys[i] for i in self.time_list.curselection() if i < len(self._time_keys)]
+
+    def _sel_label(self, ci, name):
+        return (f"{self._results[ci]['label']} {name}" if len(self._results) > 1 else name)
 
     # ── Helpers ────────────────────────────────────────────────────────────
     def _log(self, msg):
@@ -8663,6 +8729,7 @@ class Step7Page(ctk.CTkFrame):
                     self._safe(self.pb.set, i / len(slots))
                 _val_write(results, Path(out))
                 self._results = results
+                self._safe(self._populate_times)
                 self._safe(self._log, f"[OK] Saved: {Path(out).resolve()}")
                 self._safe(self._log_verdict, results)
                 self._safe(self.status.set, "Done", "ok")
@@ -8735,8 +8802,36 @@ class Step7Page(ctk.CTkFrame):
             warnings.simplefilter("ignore", RuntimeWarning)
             return x, fn(block)
 
+    def _col(self, df, name):
+        if df is None or name not in getattr(df, "columns", []):
+            return None
+        return pd.to_numeric(df[name], errors="coerce").to_numpy(float)
+
     def _plot_overlay(self):
         ax = self.ax
+        sel = self._selected()
+        if sel:
+            drew = False
+            for j, (ci, name, _t) in enumerate(sel):
+                res = self._results[ci]
+                c = _VAL_PROFILE_COLORS[j % len(_VAL_PROFILE_COLORS)]
+                x = res["proto_scaled"]["Range(m)"].to_numpy(float) / 1000.0
+                yp, ym = self._col(res["proto_scaled"], name), self._col(res["mpl_nrb"], name)
+                lab = self._sel_label(ci, name)
+                if ym is not None and np.isfinite(ym).any():
+                    ax.plot(x, np.where(ym > 0, ym, np.nan), color=c, lw=1.4, ls="--", label=f"{lab} MPL")
+                    drew = True
+                if yp is not None and np.isfinite(yp).any():
+                    ax.plot(x, np.where(yp > 0, yp, np.nan), color=c, lw=1.6, label=f"{lab} prototype")
+                    drew = True
+            if drew:
+                ax.set_yscale("log")
+            ax.set_ylabel("NRB (Mini-MPL scale)")
+            ax.set_title("Profile overlay — selected profiles\nprototype ÷ k (solid) vs Mini-MPL (dashed)",
+                         fontsize=10)
+            self._range_axis(ax)
+            ax.legend(fontsize=7, ncol=2)
+            return
         drew = False
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
@@ -8766,6 +8861,23 @@ class Step7Page(ctk.CTkFrame):
         for band, alpha in ((20.0, 0.08), (10.0, 0.12)):
             ax.axhspan(-band, band, color="#7FB069", alpha=alpha, zorder=0)
         ax.axhline(0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+        sel = self._selected()
+        if sel:
+            for j, (ci, name, _t) in enumerate(sel):
+                res = self._results[ci]
+                y = self._col(res["reldiff"], name)
+                if y is None:
+                    continue
+                x = res["reldiff"]["Range(m)"].to_numpy(float) / 1000.0
+                ax.plot(x, y, color=_VAL_PROFILE_COLORS[j % len(_VAL_PROFILE_COLORS)], lw=1.4,
+                        label=self._sel_label(ci, name), zorder=3)
+            ax.set_ylabel("(prototype − MPL) / MPL  [%]")
+            ax.set_title("Relative difference vs range — selected profiles\n"
+                         "green bands = ±10 % and ±20 %", fontsize=10)
+            ax.set_ylim(-120, 120)
+            self._range_axis(ax)
+            ax.legend(fontsize=8, ncol=2)
+            return
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
             st = res["reldiff_stats"]
@@ -8789,6 +8901,23 @@ class Step7Page(ctk.CTkFrame):
         """Ratio normalised to its own median, drawn against range."""
         ax = self.ax
         ax.axhline(1.0, color=theme.TEXT_MUTED, lw=1, ls="--", zorder=1)
+        sel = self._selected()
+        if sel:
+            for j, (ci, name, _t) in enumerate(sel):
+                res = self._results[ci]
+                y = self._col(res["ratio"], name)
+                if y is None:
+                    continue
+                x = res["ratio"]["Range(m)"].to_numpy(float) / 1000.0
+                ax.plot(x, y, color=_VAL_PROFILE_COLORS[j % len(_VAL_PROFILE_COLORS)], lw=1.4,
+                        label=self._sel_label(ci, name), zorder=3)
+            ax.set_ylabel("prototype / MPL  (÷ its own median)")
+            ax.set_title("Ratio vs range — selected profiles\nflat at 1.0 means identical profile shape",
+                         fontsize=10)
+            ax.set_ylim(0, 2.5)
+            self._range_axis(ax)
+            ax.legend(fontsize=8, ncol=2)
+            return
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
             x, med = self._across_profiles(res["ratio"], lambda b: np.nanmedian(b, axis=1))
@@ -8826,7 +8955,8 @@ class Step7Page(ctk.CTkFrame):
         except Exception:
             y0, y1 = 300.0, 5000.0
 
-        for ax, res in zip(axes, self._results):
+        sel_keys = {(ci, name) for ci, name, _t in self._selected()}
+        for ci_ax, (ax, res) in enumerate(zip(axes, self._results)):
             ps, mn, pp = res["proto_scaled"], res["mpl_nrb"], res["per_profile"]
             r = ps["Range(m)"].to_numpy(float)
             win = (r >= y0) & (r <= y1)
@@ -8858,15 +8988,18 @@ class Step7Page(ctk.CTkFrame):
                 if not (mp.any() or mm.any()):
                     continue
                 drawn.append(i)
+                fade = bool(sel_keys) and (ci_ax, name) not in sel_keys
+                lw_ = 0.5 if fade else 0.8
+                a_ = 0.25 if fade else 1.0
                 ax.axvline(x0, color="#c9ced6", lw=0.5, zorder=1)
                 ax.fill_betweenx(r, x0 + xscale * np.nan_to_num(am), x0 + xscale * np.nan_to_num(ap),
                                  where=mp & mm, color="#8a8f98", alpha=0.30, lw=0, zorder=2)
                 ax.fill_betweenx(r, x0, x0 + xscale * np.nan_to_num(am), where=mm,
                                  color=RED, alpha=0.10, lw=0, zorder=2)
-                ax.plot(x0 + xscale * am, r, color=RED, lw=0.8, zorder=4)
+                ax.plot(x0 + xscale * am, r, color=RED, lw=lw_, alpha=a_, zorder=4)
                 ax.fill_betweenx(r, x0, x0 + xscale * np.nan_to_num(ap), where=mp,
                                  color=TEAL, alpha=0.10, lw=0, zorder=3)
-                ax.plot(x0 + xscale * ap, r, color=TEAL, lw=0.8, zorder=5)
+                ax.plot(x0 + xscale * ap, r, color=TEAL, lw=lw_, alpha=a_, zorder=5)
                 w20 = float(pp["within_20pct"].iloc[i]) if "within_20pct" in pp else np.nan
                 if np.isfinite(w20):
                     col = "#3a9a4a" if w20 >= 80 else ("#e08a1e" if w20 >= 50 else "#d23b2e")
@@ -8895,6 +9028,30 @@ class Step7Page(ctk.CTkFrame):
     def _plot_depol(self):
         ax = self.ax
         drew = False
+        sel = self._selected()
+        if sel:
+            for j, (ci, name, _t) in enumerate(sel):
+                res = self._results[ci]
+                c = _VAL_PROFILE_COLORS[j % len(_VAL_PROFILE_COLORS)]
+                lab = self._sel_label(ci, name)
+                dp, dm = res.get("depol_proto"), res.get("depol_mpl")
+                yp, ym = self._col(dp, name), self._col(dm, name)
+                x = (dm if dm is not None else dp)["Range(m)"].to_numpy(float) / 1000.0 \
+                    if (dm is not None or dp is not None) else None
+                if ym is not None and np.isfinite(ym).any():
+                    ax.plot(x, ym, color=c, lw=1.4, ls="--", label=f"{lab} MPL")
+                    drew = True
+                if yp is not None and np.isfinite(yp).any():
+                    ax.plot(x, yp, color=c, lw=1.6, label=f"{lab} prototype")
+                    drew = True
+            if drew:
+                ax.set_ylabel("Volume depolarization ratio δ")
+                ax.set_title("Depolarization vs range — selected profiles\n"
+                             "prototype (solid) vs Mini-MPL converted δ = d/(1−d) (dashed)", fontsize=10)
+                ax.set_ylim(bottom=0)
+                self._range_axis(ax)
+                ax.legend(fontsize=7, ncol=2)
+                return
         for i, res in enumerate(self._results):
             c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
             dp, dm = res.get("depol_proto"), res.get("depol_mpl")
@@ -8928,6 +9085,56 @@ class Step7Page(ctk.CTkFrame):
         """Render the cross-case comparison as a table inside the figure."""
         ax = self.ax
         ax.set_axis_off()
+        sel = self._selected()
+        if sel:
+            prow = [
+                ("Day / night", "day_night", "{}"),
+                ("MPL time", "MPL time", "time"),
+                ("BG [MHz]", "bg_par_mhz", "{:.2f}"),
+                ("Bins", "n_bins", "{:.0f}"),
+                ("Ratio CV [%]", "ratio_cv_pct", "{:.1f}"),
+                ("Rel diff RMS [%]", "reldiff_rms_pct", "{:.1f}"),
+                ("Within 10 % [%]", "within_10pct", "{:.0f}"),
+                ("Within 20 % [%]", "within_20pct", "{:.0f}"),
+                ("Slope", "slope", "{:.2f}"),
+                ("r²", "r2", "{:.2f}"),
+                ("Depol rel diff [%]", "_depol", "{:.1f}"),
+            ]
+            cols, cells = [], [[] for _ in prow]
+            for ci, name, t in sel[:8]:
+                res = self._results[ci]
+                pp = res["per_profile"]
+                row = pp[pd.to_datetime(pp["Time"]) == t]
+                row = row.iloc[0] if len(row) else None
+                dep = res.get("depol")
+                dval = np.nan
+                if dep is not None and len(dep):
+                    m = dep[pd.to_datetime(dep["Time"]) == t]
+                    dval = float(m["reldiff_median_pct"].iloc[0]) if len(m) else np.nan
+                cols.append(self._sel_label(ci, name))
+                for k, (_, key, fmt) in enumerate(prow):
+                    if key == "_depol":
+                        v = dval
+                    else:
+                        v = row.get(key, np.nan) if row is not None else np.nan
+                    if fmt == "time":
+                        cells[k].append(pd.Timestamp(v).strftime("%H:%M") if pd.notna(v) else "—")
+                    elif fmt == "{}":
+                        cells[k].append(str(v) if isinstance(v, str) and v else "—")
+                    else:
+                        try:
+                            fv = float(v)
+                            cells[k].append(fmt.format(fv) if np.isfinite(fv) else "—")
+                        except (TypeError, ValueError):
+                            cells[k].append("—")
+            tbl = ax.table(cellText=cells, rowLabels=[r[0] for r in prow],
+                           colLabels=cols, loc="center", cellLoc="center")
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+            tbl.scale(1.0, 1.5)
+            more = f" (first 8 of {len(sel)})" if len(sel) > 8 else ""
+            ax.set_title(f"Per-profile metrics — selected profiles{more}", fontsize=10)
+            return
         rows = [
             ("Profiles valid", "Profiles valid", "{:.0f}"),
             ("Bins / profile", "Bins per profile (median)", "{:.0f}"),
