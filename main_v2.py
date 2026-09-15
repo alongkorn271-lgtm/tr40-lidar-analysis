@@ -6861,6 +6861,8 @@ class Step6Page(ctk.CTkFrame):
         self.cal_rmin_m   = tk.DoubleVar(value=4500.0)
         self.cal_rmax_m   = tk.DoubleVar(value=5500.0)
         self.snr_min      = tk.DoubleVar(value=3.0)   # mask δ where cross SNR below this
+        # Files with fewer shots are aborted acquisitions and are not processed.
+        self.min_shots    = tk.DoubleVar(value=1500.0)
         self.snr_gate     = tk.BooleanVar(value=True)   # gate NRB co/cross by SNR (default ON)
         # Repair the photon StErr when the recorder's squared data is corrupt
         # (32-bit overflow at high shots x high count rates — the 30 m / 300 s
@@ -7270,6 +7272,13 @@ class Step6Page(ctk.CTkFrame):
         ctk.CTkLabel(f, text="(δ set NaN where perpendicular SNR < this)",
                      font=theme.F_TINY, text_color=theme.TEXT_MUTED).grid(
             row=0, column=2, sticky="w", padx=(8, 0))
+        ms = ctk.CTkFrame(f, fg_color="transparent")
+        ms.grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(ms, text="Skip files with fewer shots than:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(0, 8))
+        ctk.CTkEntry(ms, textvariable=self.min_shots, width=80, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(ms, text="(aborted acquisitions: duplicate HH:MM columns, bias the night glue gain; 0 = keep all)",
+                     font=theme.F_TINY, text_color=theme.TEXT_MUTED).pack(side="left", padx=(8, 0))
         cb(f, "Normalise NRB co/cross in the lower troposphere (BL → 1.0, full curve, no cut)",
            self.snr_gate, row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         cb(f, "Repair corrupt photon StErr with the Poisson shot-noise estimate "
@@ -7652,6 +7661,7 @@ class Step6Page(ctk.CTkFrame):
             energy = float(self.energy_mj.get())
             o_min = float(self.overlap_o_min.get())
             snr_min_val = float(self.snr_min.get())
+            min_shots_val = float(self.min_shots.get())
         except Exception:
             messagebox.showerror("Error", "Invalid numeric parameter.")
             return
@@ -7768,6 +7778,7 @@ class Step6Page(ctk.CTkFrame):
                     overlap_O_R=ov_arr, overlap_O_min=o_min,
                     afterpulse_co=ap_co_arr, afterpulse_cross=ap_cr_arr,
                     snr_min=snr_min_val, snr_gate=bool(self.snr_gate.get()),
+                    min_shots=min_shots_val,
                     single_channel=single,
                     dual_channel_file=dual,
                     # Full raw-processing parameters (forwarded to build_single_profile

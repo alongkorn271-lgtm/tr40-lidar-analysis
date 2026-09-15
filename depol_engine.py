@@ -49,7 +49,7 @@ import pandas as pd
 
 from nrb_engine import (
     build_single_profile, snr_gate_nrb, snr_trusted_top, _looks_like_licel_binary,
-    read_shots, GLUE_GAIN_TOLERANCE,
+    read_shots, GLUE_GAIN_TOLERANCE, GLUE_REF_MIN_R2,
 )
 
 # Molecular (Rayleigh) linear depolarization ratio at 532 nm.
@@ -715,6 +715,7 @@ def build_daily_depol_from_folders(
     strict: bool = False,
     logger: Optional[Callable[[str], None]] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
+    min_shots: float = 1500.0,
     **nrb_kwargs,
 ) -> Dict[str, pd.DataFrame]:
     """
@@ -769,6 +770,31 @@ def build_daily_depol_from_folders(
         except Exception:
             pass
 
+    # Drop aborted / partial acquisitions before processing. Short files at the
+    # start of a run (tens of shots) carry the same HH:MM as the real profile, so
+    # they duplicate time columns (misaligning Step 5's RTI against the Mini-MPL)
+    # and bias the night's glue gain; a shots=0 file has no data at all. Files
+    # whose header gives no shot count are kept.
+    qc_rows: List[Dict[str, object]] = []
+    if min_shots and float(min_shots) > 0:
+        kept, dropped = [], []
+        for (ts, co, cr, key) in pairs:
+            n_co = read_shots(co)
+            n_cr = read_shots(cr) if cr != co else n_co
+            n = np.nanmin([n_co, n_cr]) if np.isfinite([n_co, n_cr]).any() else np.nan
+            if np.isfinite(n) and n < float(min_shots):
+                dropped.append((ts, key, int(n)))
+                qc_rows.append({"key": key, "time": ts, "shots": float(n),
+                                "status": f"skipped: {int(n)} shots < {float(min_shots):g}"})
+            else:
+                kept.append((ts, co, cr, key))
+        if dropped and logger:
+            logger(f"Skipped {len(dropped)} file(s) with fewer than {float(min_shots):g} shots: "
+                   + ", ".join(f"{k} ({n})" for _, k, n in dropped))
+        pairs = kept
+        if not pairs:
+            raise ValueError(f"Every file has fewer than {float(min_shots):g} shots.")
+
     ref_r: Optional[np.ndarray] = None
     ts_list: List[pd.Timestamp] = []
     dv_cols: List[np.ndarray] = []
@@ -780,7 +806,6 @@ def build_daily_depol_from_folders(
     snr_co_cols: List[np.ndarray] = []
     snr_cr_cols: List[np.ndarray] = []
     diag_list: List[Dict[str, object]] = []   # per-profile signal diagnostics
-    qc_rows: List[Dict[str, object]] = []
     total = len(pairs)
 
     def _process(ts, co_path, cr_path, gain_co=None, gain_cross=None):
@@ -821,19 +846,25 @@ def build_daily_depol_from_folders(
             progress_cb(90.0 * idx / total)
 
     # Pass 2: the analog->photon gain is a property of the instrument, so a night
-    # profile whose own fit had too few clean bins (cloud) or strays from the
-    # night's gain is re-run with the night's gain (median of the clean fits).
+    # profile whose own fit had too few clean bins (cloud), fits poorly, or strays
+    # from the night's gain is re-run with the night's gain. Only well-fitting
+    # clean fits (r2 >= GLUE_REF_MIN_R2) define that gain: on 2026-09-09 (30 m) the
+    # parallel fits with r2 0.58-0.90 gave 109-136 MHz/mV against 94.7 and 98.3
+    # from the two good ones, and pulled the median up to 109.
     if single is None and str(nrb_kwargs.get("glue_fit", "robust")).lower() == "robust":
-        ref = {}
+        ref, nref = {}, {}
         for pref in ("par", "perp"):
             g = [m.get(f"{pref}_slope") for (_, _, _, _, d, m, err) in processed
                  if err is None and m.get(f"{pref}_glue_fit_mode") == "robust_median_gain"
                  and m.get(f"{pref}_day_night_glue_pick", "night_glue") != "day_glue_bgsub"
-                 and np.isfinite(m.get(f"{pref}_slope", np.nan))]
+                 and np.isfinite(m.get(f"{pref}_slope", np.nan))
+                 and np.isfinite(m.get(f"{pref}_fit_quality_r2", np.nan))
+                 and m.get(f"{pref}_fit_quality_r2") >= GLUE_REF_MIN_R2]
             ref[pref] = float(np.median(g)) if len(g) >= 2 else np.nan
+            nref[pref] = len(g)
         if logger:
-            logger(f"night glue gain: parallel {ref['par']:.2f}, "
-                   f"perpendicular {ref['perp']:.2f} MHz/mV")
+            logger(f"night glue gain: parallel {ref['par']:.2f} (from {nref['par']} fits), "
+                   f"perpendicular {ref['perp']:.2f} (from {nref['perp']} fits) MHz/mV")
         for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
             if err is not None:
                 continue
@@ -844,7 +875,9 @@ def build_daily_depol_from_folders(
                         or str(meta.get(f"{pref}_glue_mode", "")).startswith("photon_only")):
                     continue
                 sl = meta.get(f"{pref}_slope", np.nan)
-                bad_mode = meta.get(f"{pref}_glue_fit_mode") != "robust_median_gain"
+                r2_ = meta.get(f"{pref}_fit_quality_r2", np.nan)
+                bad_mode = (meta.get(f"{pref}_glue_fit_mode") != "robust_median_gain"
+                            or not (np.isfinite(r2_) and r2_ >= GLUE_REF_MIN_R2))
                 stray = (not np.isfinite(sl)) or abs(sl - ref[pref]) > GLUE_GAIN_TOLERANCE * ref[pref]
                 if bad_mode or stray:
                     force[pref] = ref[pref]

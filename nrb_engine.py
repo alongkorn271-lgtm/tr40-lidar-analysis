@@ -646,6 +646,7 @@ GLUE_MAD_REJECT = 3.0            # drop per-bin gains beyond 3 robust sigmas
 GLUE_ROBUST_MIN_BINS = 20        # fewer clean bins -> least squares, flagged, and the
                                  # daily builder replaces it with the night's gain
 GLUE_GAIN_TOLERANCE = 0.15       # a profile gain this far from the night's is replaced
+GLUE_REF_MIN_R2 = 0.95           # only fits this good define the night's gain; worse ones are replaced
 
 
 def robust_glue_gain(
@@ -825,7 +826,13 @@ def compute_nrb_reference_glue(
                 fit_rmse = float(np.sqrt(ss_res / n_fit))
             fit_mode = "night_gain_override"
             robust_done = True
-        elif str(glue_fit).strip().lower() == "robust":
+        elif str(glue_fit).strip().lower() == "robust" and not _bgsub:
+            # Night glue only. The daytime background-subtracted glue works in a
+            # rate regime where the photon counter is far from linear even after
+            # the dead-time correction; there the legacy line WITH a free offset
+            # is the validated fit (2026-09-08 15:30-18:00: r2 0.97-0.98), while a
+            # proportional per-bin gain drops to r2 0.74-0.87 and trips the
+            # daytime quality guard into photon-only.
             bg_p_for_gain = float(bg_pretrigger_photon_mhz)
             for mode_name, hi_rate in (("robust_median_gain", float(max_toggle_rate)),):
                 cand = (sig_mask & np.isfinite(photon_toggle) & (~sat)
@@ -851,8 +858,10 @@ def compute_nrb_reference_glue(
                 analog_raw[fit_mask], photon_dt_mhz[fit_mask]
             )
             analog_scaled = slope * analog_raw + offset
-            if str(glue_fit).strip().lower() == "robust":
+            if str(glue_fit).strip().lower() == "robust" and not _bgsub:
                 fit_mode = "ols_fallback"
+            elif _bgsub:
+                fit_mode = "ols_daytime"
         else:
             fallback_mask = sig_mask & np.isfinite(analog_raw) & np.isfinite(photon_dt_mhz) & (~sat)
             if int(np.sum(fallback_mask)) >= 2:
