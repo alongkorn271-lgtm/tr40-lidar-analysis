@@ -480,9 +480,17 @@ def read_tr40_dat_ascii(
             "photon_stderr_MHz": arr_sig[:, c0 + 3],
         }
     )
-    # Per-bin overflow/saturation flag (col 8) is present for raw binary files
-    # (all channels share it); ASCII exports drop it, so default to 0.
-    df["overflow"] = arr_sig[:, 8] if arr_sig.shape[1] > 8 else 0.0
+    # Per-bin overflow flag (col 8), raw binary files only; ASCII exports drop it.
+    # The value is a BITMASK over the file's analog datasets (Licel Ethernet
+    # controller manual, "Overflow data set"): bit0 = first analog dataset (TR0,
+    # parallel), bit1 = second (TR1, perpendicular), 3 = both. Keep only this
+    # channel's bit -- testing "> 0" made a perpendicular clip mark the parallel
+    # bin saturated and vice versa (2026-09-08/09 files carry values 1, 2 and 3).
+    if arr_sig.shape[1] > 8:
+        bit = 2 if c0 == 4 else 1
+        df["overflow"] = (arr_sig[:, 8].astype(np.int64) & bit).astype(float) / bit
+    else:
+        df["overflow"] = 0.0
     return df
 
 
