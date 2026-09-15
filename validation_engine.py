@@ -124,12 +124,24 @@ def _read_qc(xl: pd.ExcelFile) -> Dict:
                 else pd.Series(np.nan, index=q.index))
 
     shots, bg, r2 = col("shots"), col("bg_par_mhz"), col("par_fit_quality_r2")
+    # A profile glued with the night's gain keeps the r2 of that forced line
+    # against its own (cloud-contaminated) bins, which says nothing about day or
+    # night -- ignore it there, as for any skipped row.
+    mode = (q["par_glue_fit_mode"].astype(str) if "par_glue_fit_mode" in q.columns
+            else pd.Series("", index=q.index))
+    status = q["status"].astype(str) if "status" in q.columns else pd.Series("ok", index=q.index)
     out = {}
     for i, t in enumerate(pd.to_datetime(q["time"], errors="coerce")):
         if pd.notna(t):
-            out[pd.Timestamp(t)] = {"shots": float(shots.iloc[i]),
-                                    "bg_mhz": float(bg.iloc[i]),
-                                    "glue_r2": float(r2.iloc[i])}
+            r2_i = float(r2.iloc[i])
+            if mode.iloc[i] == "night_gain_override":
+                r2_i = float("nan")
+            row = {"shots": float(shots.iloc[i]), "bg_mhz": float(bg.iloc[i]), "glue_r2": r2_i}
+            # Files Step 2 skipped (too few shots) have no profile column; their
+            # rows sit seconds from the real profile and must never shadow it.
+            if status.iloc[i].startswith("skipped"):
+                continue
+            out[pd.Timestamp(t)] = row
     return out
 
 
