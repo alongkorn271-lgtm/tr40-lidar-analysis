@@ -8218,6 +8218,7 @@ VALIDATION_PLOT_MODES = [
     "3 · Ratio vs range",
     "4 · Depolarization vs range",
     "5 · Summary table",
+    "6 · Per-profile (RTI lines)",
 ]
 
 # What each view shows and how to read it — shown under the view selector.
@@ -8238,6 +8239,11 @@ VALIDATION_VIEW_HELP = {
     "5": ("กราฟ 5 · ตารางตัวเลขสรุปของแต่ละ case (ไม่มีแกน)\n"
           "Ratio CV / Rel diff RMS: ยิ่งต่ำยิ่งดี · Within 10/20 %: ยิ่งสูงยิ่งดี · "
           "Slope ใกล้ 1 และ r² ใกล้ 1 = ดี"),
+    "6": ("กราฟ 6 · เทียบทีละเวลา แบบ RTI-lines ของ Step 5 (หนึ่งแถวต่อ case)\n"
+          "แต่ละคอลัมน์ = 1 profile ที่เวลานั้น · เส้นฟ้า = prototype (หาร k แล้ว) · เส้นแดง = Mini-MPL · "
+          "เงาเทา = ส่วนต่าง · ตัวเลขด้านบน = % ของ bin ที่อยู่ใน ±20 % (เขียว ≥80 · ส้ม 50–80 · แดง <50)\n"
+          "อ่านยังไง: หาคอลัมน์ที่เส้นแยกกันหรือตัวเลขแดง = profile ที่ดึงค่าเฉลี่ยให้แย่ (เช่นมีเมฆหรือเวลาไม่ตรง) · "
+          "ช่วงที่เส้นขาด = bin ที่ถูกตัดเพราะ SNR ไม่ผ่าน"),
 }
 
 
@@ -8699,7 +8705,7 @@ class Step7Page(ctk.CTkFrame):
         key = self.plot_mode.get().strip()[:1]
         try:
             {"1": self._plot_overlay, "2": self._plot_reldiff, "3": self._plot_ratio,
-             "4": self._plot_depol}.get(key, self._plot_summary)()
+             "4": self._plot_depol, "6": self._plot_rti_lines}.get(key, self._plot_summary)()
         except Exception as e:
             self.ax.clear()
             self.ax.text(0.5, 0.5, f"Plot failed:\n{e}", ha="center", va="center",
@@ -8798,6 +8804,93 @@ class Step7Page(ctk.CTkFrame):
         ax.set_ylim(0, 2.5)
         self._range_axis(ax)
         ax.legend(fontsize=9)
+
+    def _plot_rti_lines(self):
+        """Every matched profile as its own column, like Step 5's RTI-lines view.
+
+        One row per case. Each profile pair is scaled by that profile's Mini-MPL
+        maximum inside the window, so a column's width means "as strong as MPL's
+        peak" in every profile and columns never overlap. The number above each
+        column is the share of its bins within +/-20 % of the Mini-MPL.
+        """
+        import matplotlib.dates as mdates
+        from matplotlib.lines import Line2D
+        TEAL, RED = "#2b8ca6", "#e24a3b"
+        self.fig.clear()
+        n = len(self._results)
+        axes = [self.fig.add_subplot(n, 1, i + 1) for i in range(n)]
+        self.ax = axes[0]
+        first = self._results[0]["summary"].iloc[0]
+        try:
+            y0, y1 = (float(v) for v in str(first["Window (m)"]).split("-"))
+        except Exception:
+            y0, y1 = 300.0, 5000.0
+
+        for ax, res in zip(axes, self._results):
+            ps, mn, pp = res["proto_scaled"], res["mpl_nrb"], res["per_profile"]
+            r = ps["Range(m)"].to_numpy(float)
+            win = (r >= y0) & (r <= y1)
+            times = [pd.Timestamp(t) for t in pp["Time"]]
+            if not times:
+                ax.text(0.5, 0.5, "no matched profiles", ha="center", va="center",
+                        transform=ax.transAxes)
+                continue
+            xnum = np.array([mdates.date2num(t.to_pydatetime()) for t in times], float)
+            order = np.argsort(xnum)
+            gap = float(np.median(np.diff(np.sort(xnum)))) if xnum.size >= 2 else 30.0 / 1440.0
+            xscale = gap * 0.8
+            drawn = []
+            for i in order:
+                name = times[i].strftime("%H:%M")
+                if name not in ps.columns or name not in mn.columns:
+                    continue
+                yp = pd.to_numeric(ps[name], errors="coerce").to_numpy(float)
+                ym = pd.to_numeric(mn[name], errors="coerce").to_numpy(float)
+                ref = np.nanmax(np.where(win, ym, np.nan)) if np.isfinite(ym[win]).any() else np.nan
+                if not np.isfinite(ref) or ref <= 0:
+                    continue
+                x0 = xnum[i]
+                # Keep NaN where a bin was masked so lines and fills break there
+                # instead of bridging the gap with a straight segment.
+                ap = np.where(win, np.clip(yp / ref, 0.0, 1.3), np.nan)
+                am = np.where(win, np.clip(ym / ref, 0.0, 1.3), np.nan)
+                mp, mm = np.isfinite(ap), np.isfinite(am)
+                if not (mp.any() or mm.any()):
+                    continue
+                drawn.append(i)
+                ax.axvline(x0, color="#c9ced6", lw=0.5, zorder=1)
+                ax.fill_betweenx(r, x0 + xscale * np.nan_to_num(am), x0 + xscale * np.nan_to_num(ap),
+                                 where=mp & mm, color="#8a8f98", alpha=0.30, lw=0, zorder=2)
+                ax.fill_betweenx(r, x0, x0 + xscale * np.nan_to_num(am), where=mm,
+                                 color=RED, alpha=0.10, lw=0, zorder=2)
+                ax.plot(x0 + xscale * am, r, color=RED, lw=0.8, zorder=4)
+                ax.fill_betweenx(r, x0, x0 + xscale * np.nan_to_num(ap), where=mp,
+                                 color=TEAL, alpha=0.10, lw=0, zorder=3)
+                ax.plot(x0 + xscale * ap, r, color=TEAL, lw=0.8, zorder=5)
+                w20 = float(pp["within_20pct"].iloc[i]) if "within_20pct" in pp else np.nan
+                if np.isfinite(w20):
+                    col = "#3a9a4a" if w20 >= 80 else ("#e08a1e" if w20 >= 50 else "#d23b2e")
+                    ax.text(x0 + xscale * 0.4, y1, f"{w20:.0f}", ha="center", va="bottom",
+                            fontsize=7, color=col, fontweight="bold", clip_on=False)
+            xs = xnum[drawn] if drawn else xnum
+            ax.set_xlim(xs.min() - gap * 0.5, xs.max() + xscale + gap * 0.5)
+            ax.set_ylim(y0, y1)
+            # Tick only the profiles that had bins to draw; the rest were masked out.
+            ax.set_xticks(xnum[drawn])
+            ax.set_xticklabels([times[i].strftime("%H:%M") for i in drawn], rotation=30,
+                               ha="right", fontsize=8)
+            skipped = len(order) - len(drawn)
+            if skipped:
+                ax.text(1.0, -0.16, f"{skipped} matched profile(s) had no bins passing the SNR mask",
+                        transform=ax.transAxes, ha="right", va="top", fontsize=7, color=theme.TEXT_MUTED)
+            ax.set_ylabel("Range [m]")
+            ax.set_title(f"{res['label']} — each matched profile (prototype ÷ k vs Mini-MPL)",
+                         fontsize=10, pad=14)
+            ax.grid(True, axis="y", alpha=0.20)
+        axes[-1].set_xlabel("Time (local)")
+        leg = axes[0].legend([Line2D([0], [0], color=TEAL, lw=1.4), Line2D([0], [0], color=RED, lw=1.4)],
+                             ["Prototype ÷ k", "Mini-MPL"], loc="upper left", framealpha=0.95, fontsize=8)
+        leg.set_zorder(20)
 
     def _plot_depol(self):
         ax = self.ax
