@@ -436,8 +436,14 @@ def raw_file_to_array(rf: LicelRawFile, *,
             overflow_dev = g.get("overflow")
 
     if overflow_dev is not None:
+        # The overflow flags follow the SIGNAL bin grid, also with the frequency
+        # divider: a 30 m file declares 9024 overflow bins but only the first 1128
+        # (one per 30 m signal bin) are used and the rest are zero. Verified on
+        # 2026-09-09: flags at indices 127-251, right where the analog reaches
+        # ~500 mV (indices 131-133). Do not resample them to "primary" bins.
         of = rf.raw[overflow_dev]
-        cols[8][:of.size] = of[:nbins]
+        n = min(of.size, nbins)
+        cols[8][:n] = of[:n]
 
     return np.column_stack(cols)
 
