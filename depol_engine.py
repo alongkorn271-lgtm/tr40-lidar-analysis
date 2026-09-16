@@ -1090,13 +1090,22 @@ def build_daily_depol_from_folders(
                     force[pref] = gains[pref]
             if not force:
                 continue
+            # The re-run rebuilds BOTH channels, so the other channel must keep what
+            # pass 3 decided for it: a channel over the current limit stays photon
+            # only. (2026-09-15 13:30 lost exactly that: the parallel channel took the
+            # night gain and the over-current perpendicular came back glued.)
+            po = {p_: meta.get(f"{p_}_pmt_overcurrent") == 1.0 for p_ in ("par", "perp")}
             try:
                 df2, meta2 = _process(ts, co_path, cr_path,
-                                      gain_co=force.get("par"), gain_cross=force.get("perp"))
-                for p_ in force:
-                    meta2[f"{p_}_glue_fit_mode"] = "day_night_gain"
+                                      gain_co=force.get("par"), gain_cross=force.get("perp"),
+                                      po_co=po["par"], po_cross=po["perp"])
+                for p_ in ("par", "perp"):
                     for k in ("solar_dc_mv", "pmt_overcurrent"):
                         meta2[f"{p_}_{k}"] = meta.get(f"{p_}_{k}")
+                    if po[p_]:
+                        meta2[f"{p_}_glue_mode"] = "pmt_overcurrent_photon_only"
+                for p_ in force:
+                    meta2[f"{p_}_glue_fit_mode"] = "day_night_gain"
                 processed[i] = (ts, co_path, cr_path, key, df2, meta2, None)
                 n_day += 1
             except Exception as e:
