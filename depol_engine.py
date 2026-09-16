@@ -50,6 +50,7 @@ import pandas as pd
 from nrb_engine import (
     build_single_profile, snr_gate_nrb, snr_trusted_top, _looks_like_licel_binary,
     read_shots, GLUE_GAIN_TOLERANCE, GLUE_REF_MIN_R2, PMT_MAX_DC_MV,
+    DEAD_TIME_NS_PAR, DEAD_TIME_NS_PERP,
 )
 
 # Molecular (Rayleigh) linear depolarization ratio at 532 nm.
@@ -789,9 +790,9 @@ def build_daily_depol_from_folders(
     pmt_max_dc_mv: float = PMT_MAX_DC_MV,
     dark_offset_par_mv: Optional[float] = None,
     dark_offset_perp_mv: Optional[float] = None,
-    dead_time_ns_par: Optional[float] = None,
-    dead_time_ns_perp: Optional[float] = None,
-    day_glue_from_night_gain: bool = False,
+    dead_time_ns_par: Optional[float] = DEAD_TIME_NS_PAR,
+    dead_time_ns_perp: Optional[float] = DEAD_TIME_NS_PERP,
+    day_glue_from_night_gain: bool = True,
     **nrb_kwargs,
 ) -> Dict[str, pd.DataFrame]:
     """
@@ -801,6 +802,11 @@ def build_daily_depol_from_folders(
     `fallback_glue_gain_par/perp` (MHz/mV) stand in for the night's glue gain
     when fewer than two clean fits define it (a cloudy night), so the bad fits
     are still replaced; None leaves such a night with its own fits.
+
+    `dead_time_ns_par/perp` default to the measured per-channel values (a caller
+    that wants one shared value passes None for both); `day_glue_from_night_gain`
+    scales the daytime analog with the night's gain wherever the PMT current says
+    the analog is still good, instead of a daytime fit (Licel 9.7.5).
 
     `pmt_current_check` compares each profile's pretrigger analog level, minus the
     dark offset, with `pmt_max_dc_mv` (Licel PMT manual §5.1: 5 mV = 100 uA must
