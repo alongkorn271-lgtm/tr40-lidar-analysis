@@ -46,9 +46,7 @@
 > than 120 µA are drawn from the tube for more than 100...1000ms. If this happens the signal will
 > be severely distorted and not useful for any LIDAR measurement."
 
-**Licel PMT datasheet** ระบุตรงกัน: max average anode current 0.1 mA, overcurrent protection
-มากกว่า 0.5 mA เป็นเวลา 1 วินาที, gain 2×10⁵–2×10⁶, ช่วง HV −100 V ถึง −1 kV, ความกว้าง pulse
-ของโฟตอนเดี่ยวน้อยกว่า 2 ns
+**Licel PMT datasheet** ตรงกันเรื่องกระแสเฉลี่ยสูงสุด 0.1 mA (= 100 µA) และระบุ gain 2×10⁵–2×10⁶, ช่วง HV −100 V ถึง −1 kV, ความกว้าง pulse ของโฟตอนเดี่ยวน้อยกว่า 2 ns **แต่ระบุจุดที่วงจรป้องกันเริ่มทำงานต่างจากคู่มือ:** datasheet บอกเกิน 0.5 mA นาน 1 วินาที ส่วนคู่มือบอกเกิน 120 µA นาน 100–1000 ms ยังไม่ทราบว่าโมดูลของเราใช้เกณฑ์ไหน (รายละเอียดและผลที่วัดได้ช่วงกลางวันอยู่ในเอกสารแยกเรื่องกระแส PMT)
 
 ### 1.4 คำเตือนเรื่องการลด HV
 **PMT manual ข้อ 5.1 และข้อ 3**
