@@ -64,6 +64,28 @@ DAY_BG_THRESHOLD_MHZ = 10.0
 DAY_GLUE_R2_MIN = 0.75
 # Tolerance bands drawn on the relative-difference figure.
 TOLERANCE_BANDS_PCT = (10.0, 20.0)
+# Cloud screening. Bins from the lowest Mini-MPL cloud base upward take no part:
+#  * inside a cloud the two receivers are not comparable -- the analog channel
+#    clips (TR40 parallel 145-420 mV on 2026-09-14/15), the photon channel piles
+#    up, and multiple scattering depends on each telescope's field of view;
+#  * above a cloud the signal is attenuated to the detection limit, and the TR40
+#    analog is still recovering from the overload (tail, then undershoot).
+# EARLINET instrument intercomparisons exclude optically thick clouds and restrict
+# the comparison to a valid range lowered by cloud attenuation (Wandinger et al.
+# 2016, AMT 9, 1001, Sect. 4). Mini-MPL cloud heights are range from the
+# instrument (km, 30 m grid) -- the same axis as ours. Every MPL cloud within
+# CLOUD_TIME_WINDOW_MIN of the prototype time counts: the matched 5-min MPL
+# profile and its two neighbours. The Licel file time is the END of the
+# acquisition (header start/stop; 2401 shots at 10 Hz = 4 min before it), and
+# matching MPL at the file time gave the best shape agreement (lag 0 vs -5/-10/
+# -15 min on 2026-09-08/09/14/15). A +-10 min window pulled in a 210 m cloud
+# that reached the site 10 min after the 2026-09-09 00:15 profile, which is flat
+# against MPL to 3 km. The margin covers the MPL range bin plus the rise of the
+# backscatter below the reported base.
+CLOUD_TIME_WINDOW_MIN = 5.0
+CLOUD_BASE_MARGIN_M = 150.0
+# Fewer compared bins than this (= 300 m on the 30 m grid) -> not a valid profile.
+MIN_COMPARE_BINS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +146,7 @@ def _read_qc(xl: pd.ExcelFile) -> Dict:
                 else pd.Series(np.nan, index=q.index))
 
     shots, bg, r2 = col("shots"), col("bg_par_mhz"), col("par_fit_quality_r2")
-    # A profile glued with the night's gain keeps the r2 of that forced line
+    # A profile glued with the night's (or the fixed fallback) gain keeps the r2 of that forced line
     # against its own (cloud-contaminated) bins, which says nothing about day or
     # night -- ignore it there, as for any skipped row.
     mode = (q["par_glue_fit_mode"].astype(str) if "par_glue_fit_mode" in q.columns
@@ -134,7 +156,7 @@ def _read_qc(xl: pd.ExcelFile) -> Dict:
     for i, t in enumerate(pd.to_datetime(q["time"], errors="coerce")):
         if pd.notna(t):
             r2_i = float(r2.iloc[i])
-            if mode.iloc[i] == "night_gain_override":
+            if mode.iloc[i] in ("night_gain_override", "fixed_gain_fallback"):
                 r2_i = float("nan")
             row = {"shots": float(shots.iloc[i]), "bg_mhz": float(bg.iloc[i]), "glue_r2": r2_i}
             # Files Step 2 skipped (too few shots) have no profile column; their
@@ -279,6 +301,30 @@ def is_night(ts) -> bool:
     return h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR
 
 
+def _minutes_apart(a, b) -> float:
+    """Time-of-day distance in minutes, across midnight (MPL columns are HH:MM)."""
+    a, b = pd.Timestamp(a), pd.Timestamp(b)
+    d = abs((a.hour * 60 + a.minute + a.second / 60.0) - (b.hour * 60 + b.minute + b.second / 60.0))
+    return min(d, 1440.0 - d)
+
+
+def lowest_cloud_base_m(clouds: Optional[pd.DataFrame], ts,
+                        window_min: float = CLOUD_TIME_WINDOW_MIN) -> float:
+    """Lowest Mini-MPL cloud base [m] within ``window_min`` of ``ts``; NaN = no cloud.
+
+    ``clouds`` is Step 1's MPL_clouds sheet (Time, cloud_index, base_m, top_m).
+    """
+    if clouds is None or not len(clouds) or "base_m" not in clouds.columns:
+        return float("nan")
+    tcol = next((c for c in clouds.columns if str(c).strip().lower() == "time"), clouds.columns[0])
+    t = pd.to_datetime(clouds[tcol], errors="coerce")
+    base = pd.to_numeric(clouds["base_m"], errors="coerce")
+    near = [i for i in range(len(clouds))
+            if pd.notna(t.iloc[i]) and np.isfinite(base.iloc[i])
+            and _minutes_apart(t.iloc[i], ts) <= window_min]
+    return float(base.iloc[near].min()) if near else float("nan")
+
+
 def match_profiles(proto_ts: List, mpl_ts: List,
                    tolerance_min: float = MATCH_TOLERANCE_MIN,
                    ) -> List[Tuple]:
@@ -378,15 +424,30 @@ def compare_one(r_grid: np.ndarray, proto: np.ndarray, mpl: np.ndarray,
 
 
 def mpl_depol_to_delta(d) -> np.ndarray:
-    """Mini-MPL depolarization -> our volume depolarization ratio.
+    """Mini-MPL depolarization -> volume linear depolarization ratio (no conversion).
 
-    SigmaMPL reports  d = cross/(cross+co);  the project uses the standard
-    volume ratio  delta = cross/co = d/(1-d). Values outside [0,1) are dropped.
+    The Mini-MPL does NOT transmit one fixed polarization: it alternates linear and
+    circular ("The parallel component is measured with a linearly polarized beam
+    while the perpendicular component is measured with a circular polarized beam",
+    SigmaMPL manual 4.14.1, after Flynn et al. 2007). For that hybrid technique the
+    VOLUME LINEAR depolarization ratio is
+
+        delta_V = P_cross / (P_co + P_cross) = delta_MPL / (delta_MPL + 1)
+
+    with delta_MPL = P_cross/P_co (Cordoba-Jabonero et al. 2021, AMT 14, 5225,
+    Eqs. 2 and 6, from Eq. 1.8 of Flynn et al. 2007). SigmaMPL already applies that
+    step -- checked against a file: its depolarization_ratio matches cross/(cross+co)
+    to 5e-5, not cross/co -- so the value in the workbook IS delta_V.
+
+    Our transmitter is linearly polarized, so our delta = cross/co is delta_V too.
+    The two are therefore compared as they are. The previous d/(1-d) step converted
+    the Mini-MPL value back into ITS cross/co, a different quantity, and inflated it
+    (by 11 % at delta = 0.1, 43 % at 0.3). Values outside [0, 1) are dropped.
     """
     a = np.asarray(d, float)
     out = np.full(a.shape, np.nan)
     ok = np.isfinite(a) & (a >= 0) & (a < 1)
-    out[ok] = a[ok] / (1.0 - a[ok])
+    out[ok] = a[ok]
     return out
 
 
@@ -407,6 +468,9 @@ def run_validation(
     min_shots: float = MIN_SHOTS,
     day_bg_threshold_mhz: float = DAY_BG_THRESHOLD_MHZ,
     day_glue_r2_min: float = DAY_GLUE_R2_MIN,
+    cloud_screen: bool = True,
+    cloud_margin_m: float = CLOUD_BASE_MARGIN_M,
+    cloud_window_min: float = CLOUD_TIME_WINDOW_MIN,
     logger: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, object]:
     """Validate one prototype case against the Mini-MPL reference.
@@ -481,6 +545,12 @@ def run_validation(
             f"No prototype profile matched an MPL profile within "
             f"{match_tolerance_min:g} min under the '{tf}' filter.")
 
+    screen = bool(cloud_screen) and mpl.get("clouds") is not None
+    if cloud_screen and not screen:
+        log(f"[{label}] cloud screen unavailable — the MPL workbook has no 'MPL_clouds' "
+            f"sheet. Re-run Step 1 to enable it.")
+    n_screened = 0
+
     rows: List[dict] = []
     depol_rows: List[dict] = []
     reldiff_cols: Dict[str, np.ndarray] = {}
@@ -495,6 +565,13 @@ def run_validation(
         m_nrb = np.asarray(mpl["nrb"][m_ts], float)
 
         mask = in_window.copy()
+        cloud_m = (lowest_cloud_base_m(mpl["clouds"], p_ts, cloud_window_min)
+                   if screen else float("nan"))
+        top_m = float(rmax_m)
+        if np.isfinite(cloud_m) and cloud_m - float(cloud_margin_m) < top_m:
+            top_m = cloud_m - float(cloud_margin_m)
+            mask &= r_grid < top_m
+            n_screened += 1
         if proto["snr"] and p_ts in proto["snr"]:
             p_snr = resample_to_grid(proto["range_m"], proto["snr"][p_ts], r_grid)
             mask &= np.isfinite(p_snr) & (p_snr >= snr_min)
@@ -509,8 +586,18 @@ def run_validation(
         proto_cols[name] = res.pop("proto_scaled_profile")
         mplnrb_cols[name] = res.pop("mpl_profile")
         qrow = _qc_for(qc, p_ts) or {}
-        rows.append({"Time": pd.Timestamp(p_ts), "MPL time": pd.Timestamp(m_ts),
+        # MPL columns are HH:MM: put the MPL time on the prototype's date,
+        # the nearer side of midnight.
+        p_t, m_t = pd.Timestamp(p_ts), pd.Timestamp(m_ts)
+        m_show = pd.Timestamp.combine(p_t.date(), m_t.time())
+        if (m_show - p_t).total_seconds() > 43200:
+            m_show -= pd.Timedelta(days=1)
+        elif (p_t - m_show).total_seconds() > 43200:
+            m_show += pd.Timedelta(days=1)
+        rows.append({"Time": p_t, "MPL time": m_show,
                      "dt (min)": round(dt_min, 1),
+                     "cloud_base_m": cloud_m,
+                     "compare_top_m": top_m,
                      "shots": qrow.get("shots", np.nan),
                      "bg_par_mhz": qrow.get("bg_mhz", np.nan),
                      "glue_r2": qrow.get("glue_r2", np.nan),
@@ -522,7 +609,7 @@ def run_validation(
         if proto["depol"] and mpl["depol"] and p_ts in proto["depol"] and m_ts in mpl["depol"]:
             p_dep = resample_to_grid(proto["depol_range_m"], proto["depol"][p_ts], r_grid)
             m_dep = mpl_depol_to_delta(mpl["depol"][m_ts])
-            dm = in_window & np.isfinite(p_dep) & np.isfinite(m_dep) & (m_dep > 0)
+            dm = in_window & (r_grid < top_m) & np.isfinite(p_dep) & np.isfinite(m_dep) & (m_dep > 0)
             if dm.sum() >= 3:
                 dep_proto_cols[name] = np.where(dm, p_dep, np.nan)
                 dep_mpl_cols[name] = np.where(dm, m_dep, np.nan)
@@ -553,7 +640,12 @@ def run_validation(
         })
 
     depol_df = pd.DataFrame(depol_rows)
-    valid = per_profile[per_profile["n_bins"] >= 3] if len(per_profile) else per_profile
+    valid = (per_profile[per_profile["n_bins"] >= MIN_COMPARE_BINS]
+             if len(per_profile) else per_profile)
+    if screen:
+        log(f"[{label}] cloud screen: {n_screened}/{len(per_profile)} profile(s) cut below "
+            f"the lowest MPL cloud base − {cloud_margin_m:.0f} m (clouds within "
+            f"±{cloud_window_min:.0f} min)")
 
     def _med(col: str) -> float:
         if not len(valid):
@@ -580,6 +672,9 @@ def run_validation(
         "SNR min": snr_min,
         "Min shots": min_shots,
         "Profiles dropped (shots)": len(dropped_shots),
+        "Cloud screen": (f"MPL base − {cloud_margin_m:.0f} m, ±{cloud_window_min:.0f} min"
+                         if screen else "off"),
+        "Profiles cut by cloud": n_screened,
         "Day/night basis": basis,
         "Profiles matched": len(per_profile),
         "Profiles valid": len(valid),

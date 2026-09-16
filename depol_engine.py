@@ -24,8 +24,8 @@ Because both channels share the same telescope / spatial filter, the range^2,
 overlap O(R) and energy terms cancel in the ratio.  The two PMTs have different
 gains, leaving a single gain/calibration constant C, found by Rayleigh
 (molecular) calibration in a clean, aerosol-free reference region where the true
-depolarization is known (delta_mol ~ 0.0044 at 532 nm for a narrowband
-receiver):
+depolarization is known (delta_mol = 0.0042 at 532 nm for this receiver's 1 nm
+filter; the value follows the filter width, see DELTA_MOL_532_NARROW):
 
     C            =  < delta*(R) >_clean  /  delta_mol
     delta_v(R)   =  delta*(R) / C        (calibrated volume depolarization)
@@ -49,13 +49,19 @@ import pandas as pd
 
 from nrb_engine import (
     build_single_profile, snr_gate_nrb, snr_trusted_top, _looks_like_licel_binary,
-    read_shots, GLUE_GAIN_TOLERANCE, GLUE_REF_MIN_R2,
+    read_shots, GLUE_GAIN_TOLERANCE, GLUE_REF_MIN_R2, PMT_MAX_DC_MV,
 )
 
 # Molecular (Rayleigh) linear depolarization ratio at 532 nm.
-# ~0.0044 for a narrowband receiver that rejects rotational-Raman wings;
-# ~0.0144 for a broadband receiver (Behrendt & Nakamura 2002, Table 1).
-DELTA_MOL_532_NARROW = 0.0044
+# delta_mol is set by the RECEIVER FILTER, not by the laser: the first pure
+# rotational-Raman lines are only 0.338 nm (N2) and 0.407 nm (O2) from 532 nm and
+# are 75 % depolarized, so the wider the filter the higher delta_mol -- 0.0036 with
+# the Cabannes line alone, 0.0144 with the whole Raman band (Behrendt & Nakamura
+# 2002, Opt. Express 10, 805; their anchors 0.2-0.5 nm -> 0.0036-0.0038 reproduce
+# with the line-by-line sum used to fill in the rest: 1 nm -> 0.0042, 2 nm -> 0.0058,
+# 3 nm -> 0.0080). This receiver has a single 1 nm filter ahead of the polarizing
+# beamsplitter, shared by both channels -> 0.0042. delta scales with this value.
+DELTA_MOL_532_NARROW = 0.0042
 DELTA_MOL_532_BROAD = 0.0144
 
 # Range window (m) used to normalise the cross NRB profile to 0-1. The cross
@@ -402,8 +408,10 @@ def _glue_qc(prof_meta: Dict[str, object], prefix: str) -> Dict[str, object]:
     n_toggle_points, glue_mode)."""
     keys = ("blend_r1_used_m", "blend_r2_used_m", "slope", "offset",
             "fit_quality_r2", "fit_rmse", "n_toggle_points", "glue_fit_mode",
-            "auto_blend_ok", "toggle_mode", "glue_mode",
-            "day_night_glue_pick")
+            "glue_cloud_base_m", "overload_peak_m", "sat_bins_replaced",
+            "sat_bins_invalid", "sat_bins_suspect",
+            "bg_analog_mv", "analog_peak_mv", "analog_range_mv", "analog_peak_over_half_range",
+            "auto_blend_ok", "toggle_mode", "glue_mode", "day_night_glue_pick")
     return {f"{prefix}_{k}": prof_meta.get(k) for k in keys}
 
 
@@ -420,6 +428,7 @@ def _signal_diag(prof_df: pd.DataFrame, prof_meta: Dict[str, object]) -> Dict[st
         "photon_deadtime_corr_MHz": col("photon_deadtime_corr_MHz"),
         "analog_scaled_MHz": col("analog_scaled_MHz"),
         "glued_profile_MHz": col("glued_profile_MHz"),
+        "saturation_state": col("saturation_state"),
         "nrb": col("nrb"),
         "meta": {k: prof_meta.get(k) for k in (
             "min_toggle_rate", "max_toggle_rate", "blend_r1_used_m",
@@ -442,6 +451,8 @@ def build_depol_for_pair(
     cross_channel: str = "parallel",
     glue_gain_co: Optional[float] = None,
     glue_gain_cross: Optional[float] = None,
+    photon_only_co: bool = False,
+    photon_only_cross: bool = False,
     **nrb_kwargs,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """
@@ -475,10 +486,10 @@ def build_depol_for_pair(
     nrb_kwargs.pop("channel", None)
     co_df, co_meta = build_single_profile(
         Path(co_path), afterpulse_A_R=afterpulse_co, channel=co_channel,
-        glue_gain_override=glue_gain_co, **nrb_kwargs)
+        glue_gain_override=glue_gain_co, force_photon_only=photon_only_co, **nrb_kwargs)
     cr_df, cr_meta = build_single_profile(
         Path(cross_path), afterpulse_A_R=afterpulse_cross, channel=cross_channel,
-        glue_gain_override=glue_gain_cross, **nrb_kwargs)
+        glue_gain_override=glue_gain_cross, force_photon_only=photon_only_cross, **nrb_kwargs)
 
     r = co_df["range_m"].to_numpy(float)
     r_cr = cr_df["range_m"].to_numpy(float)
@@ -716,11 +727,28 @@ def build_daily_depol_from_folders(
     logger: Optional[Callable[[str], None]] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
     min_shots: float = 1500.0,
+    fallback_glue_gain_par: Optional[float] = None,
+    fallback_glue_gain_perp: Optional[float] = None,
+    pmt_current_check: bool = True,
+    pmt_max_dc_mv: float = PMT_MAX_DC_MV,
+    dark_offset_par_mv: Optional[float] = None,
+    dark_offset_perp_mv: Optional[float] = None,
     **nrb_kwargs,
 ) -> Dict[str, pd.DataFrame]:
     """
     Pair every co/cross file (accepts FILES or FOLDERS), compute
     depolarization, and write a workbook.
+
+    `fallback_glue_gain_par/perp` (MHz/mV) stand in for the night's glue gain
+    when fewer than two clean fits define it (a cloudy night), so the bad fits
+    are still replaced; None leaves such a night with its own fits.
+
+    `pmt_current_check` compares each profile's pretrigger analog level, minus the
+    dark offset, with `pmt_max_dc_mv` (Licel PMT manual §5.1: 5 mV = 100 uA must
+    never be exceeded); a channel over it has no meaningful analog and is re-run
+    photon-only. The dark offset is `dark_offset_par/perp_mv` when given, else the
+    median pretrigger analog of the run's night profiles (photon background below
+    the day/night switch); without either the check is skipped and logged.
 
     `single_channel` = "par" or "perp" processes ONE channel alone (no pairing,
     no δ) — for experiments that record parallel and perpendicular on separate
@@ -808,12 +836,15 @@ def build_daily_depol_from_folders(
     diag_list: List[Dict[str, object]] = []   # per-profile signal diagnostics
     total = len(pairs)
 
-    def _process(ts, co_path, cr_path, gain_co=None, gain_cross=None):
+    def _process(ts, co_path, cr_path, gain_co=None, gain_cross=None, po_co=False, po_cross=False):
         if single is not None:
+            kw = dict(nrb_kwargs)
+            if (po_co if single == "par" else po_cross):
+                kw["force_photon_only"] = True
             return build_single_channel_for_file(
                 co_path, single,
                 afterpulse=(afterpulse_co if single == "par" else afterpulse_cross),
-                snr_min=snr_min, snr_gate=snr_gate, **nrb_kwargs)
+                snr_min=snr_min, snr_gate=snr_gate, **kw)
         return build_depol_for_pair(
             co_path, cr_path,
             delta_mol=delta_mol, cal_rmin_m=cal_rmin_m, cal_rmax_m=cal_rmax_m,
@@ -822,6 +853,7 @@ def build_daily_depol_from_folders(
             co_channel="parallel",
             cross_channel="perpendicular" if dual_channel_file else "parallel",
             glue_gain_co=gain_co, glue_gain_cross=gain_cross,
+            photon_only_co=po_co, photon_only_cross=po_cross,
             **nrb_kwargs,
         )
 
@@ -852,7 +884,8 @@ def build_daily_depol_from_folders(
     # parallel fits with r2 0.58-0.90 gave 109-136 MHz/mV against 94.7 and 98.3
     # from the two good ones, and pulled the median up to 109.
     if single is None and str(nrb_kwargs.get("glue_fit", "robust")).lower() == "robust":
-        ref, nref = {}, {}
+        ref, nref, src = {}, {}, {}
+        fallback = {"par": fallback_glue_gain_par, "perp": fallback_glue_gain_perp}
         for pref in ("par", "perp"):
             g = [m.get(f"{pref}_slope") for (_, _, _, _, d, m, err) in processed
                  if err is None and m.get(f"{pref}_glue_fit_mode") == "robust_median_gain"
@@ -862,9 +895,14 @@ def build_daily_depol_from_folders(
                  and m.get(f"{pref}_fit_quality_r2") >= GLUE_REF_MIN_R2]
             ref[pref] = float(np.median(g)) if len(g) >= 2 else np.nan
             nref[pref] = len(g)
+            src[pref] = f"from {len(g)} fits"
+            fb = fallback[pref]
+            if not np.isfinite(ref[pref]) and fb is not None and np.isfinite(fb) and fb > 0:
+                ref[pref] = float(fb)
+                src[pref] = f"fixed fallback, only {len(g)} clean fit(s)"
         if logger:
-            logger(f"night glue gain: parallel {ref['par']:.2f} (from {nref['par']} fits), "
-                   f"perpendicular {ref['perp']:.2f} (from {nref['perp']} fits) MHz/mV")
+            logger(f"night glue gain: parallel {ref['par']:.2f} ({src['par']}), "
+                   f"perpendicular {ref['perp']:.2f} ({src['perp']}) MHz/mV")
         for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
             if err is not None:
                 continue
@@ -886,6 +924,9 @@ def build_daily_depol_from_folders(
             try:
                 df2, meta2 = _process(ts, co_path, cr_path,
                                       gain_co=force.get("par"), gain_cross=force.get("perp"))
+                for p_ in force:
+                    if src[p_].startswith("fixed"):
+                        meta2[f"{p_}_glue_fit_mode"] = "fixed_gain_fallback"
                 processed[i] = (ts, co_path, cr_path, key, df2, meta2, None)
                 if logger:
                     logger(f"   {key}: glue gain replaced by the night's gain for "
@@ -894,6 +935,71 @@ def build_daily_depol_from_folders(
             except Exception as e:
                 if logger:
                     logger(f"   {key}: night-gain rerun failed ({e}); keeping its own fit")
+
+    # Pass 3: PMT anode current (Licel PMT manual §5.1). Sky light adds a DC level to
+    # the analog pretrigger on top of the electronics' dark offset; above 5 mV
+    # (100 uA) the tube's protection clamps it and the analog is not meaningful.
+    if pmt_current_check:
+        switch = float(nrb_kwargs.get("toggle_bg_switch_threshold_mhz", 10.0))
+        manual = {"par": dark_offset_par_mv, "perp": dark_offset_perp_mv}
+        offset, off_src = {}, {}
+        for pref in ("par", "perp"):
+            if manual[pref] is not None and np.isfinite(manual[pref]):
+                offset[pref], off_src[pref] = float(manual[pref]), "given"
+                continue
+            dark = [m.get(f"{pref}_bg_analog_mv") for (_, _, _, _, d, m, err) in processed
+                    if err is None and np.isfinite(m.get(f"bg_{pref}_mhz", np.nan))
+                    and m.get(f"bg_{pref}_mhz") < switch
+                    and np.isfinite(m.get(f"{pref}_bg_analog_mv", np.nan))]
+            offset[pref] = float(np.median(dark)) if dark else np.nan
+            off_src[pref] = f"median of {len(dark)} night pretrigger(s)" if dark else "no night profile"
+        if logger:
+            logger("PMT current check: dark offset " + ", ".join(
+                f"{'parallel' if p_ == 'par' else 'perpendicular'} "
+                + (f"{offset[p_]:.3f} mV ({off_src[p_]})" if np.isfinite(offset[p_]) else f"unknown ({off_src[p_]})")
+                for p_ in ("par", "perp")) + f"; limit {pmt_max_dc_mv:g} mV above it")
+        n_over = {"par": 0, "perp": 0}
+        for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
+            if err is not None:
+                continue
+            dc = {p_: meta.get(f"{p_}_bg_analog_mv", np.nan) - offset[p_] for p_ in ("par", "perp")}
+            over = {p_: bool(np.isfinite(dc[p_]) and dc[p_] >= float(pmt_max_dc_mv)) for p_ in ("par", "perp")}
+            redo = {p_ for p_ in ("par", "perp")
+                    if over[p_] and not str(meta.get(f"{p_}_glue_mode", "")).startswith(
+                        ("photon_only", "day_glue_guard_failed"))}
+            if redo:
+                try:
+                    df, meta2 = _process(ts, co_path, cr_path, po_co="par" in redo, po_cross="perp" in redo)
+                    for p_ in redo:
+                        meta2[f"{p_}_glue_mode"] = "pmt_overcurrent_photon_only"
+                        meta2[f"{p_}_day_night_glue_pick"] = meta.get(f"{p_}_day_night_glue_pick")
+                    meta = meta2
+                except Exception as e:
+                    if logger:
+                        logger(f"   {key}: photon-only rerun failed ({e}); keeping the glued profile")
+            for p_ in ("par", "perp"):
+                meta[f"{p_}_solar_dc_mv"] = float(dc[p_]) if np.isfinite(dc[p_]) else np.nan
+                meta[f"{p_}_pmt_overcurrent"] = float(over[p_]) if np.isfinite(dc[p_]) else np.nan
+                n_over[p_] += int(over[p_])
+            if logger and any(over.values()):
+                logger(f"   {key}: PMT over-current " + ", ".join(
+                    f"{p_} DC {dc[p_]:.2f} mV" for p_ in ("par", "perp") if over[p_])
+                    + (" -> photon only" if redo else " (already photon only)"))
+            processed[i] = (ts, co_path, cr_path, key, df, meta, None)
+        if logger:
+            logger(f"PMT over-current: parallel {n_over['par']}, perpendicular {n_over['perp']} "
+                   f"of {sum(1 for x in processed if x[6] is None)} profile(s)")
+
+    # Analog peak vs input range (PMT manual §5.2: keep it below half the range).
+    if logger:
+        for p_, name in (("par", "parallel"), ("perp", "perpendicular")):
+            hits = [(k, m.get(f"{p_}_analog_peak_mv"), m.get(f"{p_}_analog_range_mv"))
+                    for (_, _, _, k, d, m, err) in processed
+                    if err is None and m.get(f"{p_}_analog_peak_over_half_range") == 1.0]
+            if hits:
+                logger(f"Analog peak above half the input range ({name}): {len(hits)} profile(s), "
+                       f"up to {max(h[1] for h in hits):.0f} mV of {hits[0][2]:.0f} mV "
+                       "(PMT manual §5.2: keep the peak below half the range)")
 
     for idx, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed, start=1):
         if err is not None:
@@ -935,6 +1041,10 @@ def build_daily_depol_from_folders(
         snr_cr_cols.append(scr.astype(float))
         _glue_keys = ("blend_r1_used_m", "blend_r2_used_m", "slope", "offset",
                       "fit_quality_r2", "fit_rmse", "n_toggle_points", "glue_fit_mode",
+                      "glue_cloud_base_m", "overload_peak_m", "sat_bins_replaced",
+                      "sat_bins_invalid", "sat_bins_suspect",
+                      "bg_analog_mv", "solar_dc_mv", "pmt_overcurrent",
+                      "analog_peak_mv", "analog_range_mv", "analog_peak_over_half_range",
                       "auto_blend_ok", "toggle_mode", "glue_mode", "day_night_glue_pick")
         qc_rows.append({
             "key": key, "time": ts, "status": "ok",
@@ -1002,6 +1112,10 @@ def build_daily_depol_from_folders(
         "AnalogScaled_perp": _sig_frame("perp", "analog_scaled_MHz"),
         "Glued_par":         _sig_frame("par",  "glued_profile_MHz"),
         "Glued_perp":        _sig_frame("perp", "glued_profile_MHz"),
+        # 0 ok · 1 analog clipped/recovering, photon used · 2 no valid estimate
+        # (analog clipped, photon saturated) · 3 analog recovering, unverified
+        "Saturation_par":    _sig_frame("par",  "saturation_state"),
+        "Saturation_perp":   _sig_frame("perp", "saturation_state"),
     }
 
     params = pd.DataFrame([{

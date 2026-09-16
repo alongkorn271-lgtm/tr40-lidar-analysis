@@ -24,6 +24,33 @@ def cosine_taper_weight(r: np.ndarray, r1: float, r2: float) -> np.ndarray:
     return w
 
 
+# Photon-counting dead time of the TR40 (non-paralyzable, S = N/(1 - N*tau),
+# Licel manual §9.7.3). Measured 2026-09-15 from simultaneous analog + photon on
+# four nights (C01 3.75 m and C02 30 m, both PMTs): with the analog as the linear
+# reference, tau = 1/N - 1/S is 4.5-5.0 ns and flat across 20-150 MHz; the
+# dead-time-corrected photon then matches the scaled analog within +-7 % at
+# 40-130 MHz, against -8 to -36 % with the former 3.06 ns (the manual's own test:
+# corrected photon and glued curve coincide above the max toggle rate). Daytime
+# Mini-MPL agreement improved with it (2026-09-14 day CV 41 -> 20 %).
+DEFAULT_DEAD_TIME_NS = 4.8
+
+# Night toggle window = where analog AND photon are both linear, so the glue gain
+# G = (photon_dt - bg)/(analog - bg) is flat. Measured 2026-09-15 by rate band
+# (4 nights, both PMTs, 3.75 and 30 m, tau 4.8 ns, 30 m blocks): G is flat to
+# about +-1 % from 10 to 40 MHz. Below ~10 MHz the analog is so small that its
+# baseline error shifts G (30 m parallel 1-5 MHz: 112-124 against 90; a cloudy
+# perpendicular: 79-82 against 99). Above ~40 MHz the per-channel dead-time
+# residual shows (parallel +3 %, perpendicular -3 %). Licel's own glue VI defaults
+# to 1-10 MHz with a conservative 3.0 ns; its manual notes that a correct
+# dead time lengthens the region where corrected photon and glued curve
+# coincide. Against 2-10 MHz, 10-40 gave more clean fits (2026-09-09 parallel
+# 2 -> 4, 2026-09-15 perpendicular 3 -> 7), gains that match the flat band (90.1
+# and 99.0 instead of 94.1 and 93.0), and profile-to-profile gain scatter of
+# 0.3-0.5 % instead of 1.7-2.1 %.
+NIGHT_MIN_TOGGLE_MHZ = 10.0
+NIGHT_MAX_TOGGLE_MHZ = 40.0
+
+
 def dead_time_correct_mhz(rate_mhz: np.ndarray, dead_time_ns: float) -> np.ndarray:
     rate_mhz = np.asarray(rate_mhz, float)
     denom = 1.0 - rate_mhz * float(dead_time_ns) * 1e-3
@@ -175,6 +202,41 @@ def read_shots(path) -> float:
         return float(int(lines[2].split()[0]))
     except (OSError, ValueError, IndexError):
         return float("nan")
+
+
+def read_analog_input_range_mv(path, channel: str = "parallel") -> float:
+    """Analog input range [mV] of a channel, from the Licel header (NaN if unknown).
+
+    Dataset lines carry the dataset type in token 1 (0 = analog) and the analog
+    input range in volts in token 14 ("0.500"). The first analog dataset is the
+    parallel channel, the second the perpendicular one (2-PMT files). The header
+    is the same text in raw binary files and ASCII exports."""
+    try:
+        with open(path, "rb") as fh:
+            lines = fh.read(4096).splitlines()
+        ranges = []
+        for ln in lines[3:]:
+            tok = ln.decode("latin1").split()
+            if len(tok) < 16 or tok[0] not in ("0", "1"):
+                break
+            if tok[1] == "0":
+                ranges.append(float(tok[14]) * 1000.0)
+        ch = str(channel).strip().lower()
+        idx = 1 if ch in ("perpendicular", "perp", "cross", "s", "l") else 0
+        return ranges[idx] if len(ranges) > idx else float("nan")
+    except (OSError, ValueError, IndexError):
+        return float("nan")
+
+
+# PMT module limits (Licel PM-HV R9880U manual §5.1-5.2).
+# §5.1: "The maximum allowed average anode current for a R7400 or R9880 PMT is 100 uA.
+#        This corresponds to 5mV in the analog mode ... This should never be exceeded."
+#        Beyond it a protection circuit clamps the tube and the signal is "severely
+#        distorted". Measured 2026-09-08/14/15 midday: DC from sunlight 6.5-9.7 mV
+#        above the dark offset, and the analog->photon gain fell to 0.1-0.3 of the night's.
+# §5.2: "The peak signal should not exceed half of the input range."
+PMT_MAX_DC_MV = 5.0
+ANALOG_PEAK_MAX_FRACTION = 0.5
 
 
 def _looks_like_licel_binary(path: Path) -> bool:
@@ -649,12 +711,112 @@ def select_toggle_rates(
 #     ordinary regression slope toward zero (regression dilution).
 # Cross-channel slopes of 30, 73 and 39 MHz/mV on three of seven nights made the
 # near-field perpendicular signal, and so delta_v, 1.3-3x too low.
-GLUE_ANALOG_SNR_MIN = 5.0        # analog above background >= 5x its per-bin noise
+# The analog must be well above its own baseline uncertainty, not merely above its
+# noise: a ~0.01 mV baseline error is 8 % of a 0.127 mV signal. On 2026-09-15 18:30
+# (clear, twilight) the fit bins sat at 5.2 km with the analog at 82 sigma and gave
+# 96.6 MHz/mV, against 87-89 measured on strong bins; raising the cut to 200 sigma
+# brought that profile to 90.1 and cut the night-to-night spread of the parallel gain
+# from 5.9 to 1.3, leaving the median unchanged (87.8 -> 87.4). The 30 m case is
+# unaffected (its bins carry 8x the signal).
+GLUE_ANALOG_SNR_MIN = 200.0      # analog above background >= this x its per-bin noise
+# The clean bins must also cover a real stretch of atmosphere: 2026-09-15 19:30 fitted
+# 20 bins spanning 75 m and returned 75.0 MHz/mV. A bin COUNT cannot express this (20
+# bins is 75 m at 3.75 m but 600 m at 30 m), so the span is in metres.
+GLUE_MIN_SPAN_M = 300.0
 GLUE_MAD_REJECT = 3.0            # drop per-bin gains beyond 3 robust sigmas
 GLUE_ROBUST_MIN_BINS = 20        # fewer clean bins -> least squares, flagged, and the
                                  # daily builder replaces it with the night's gain
 GLUE_GAIN_TOLERANCE = 0.15       # a profile gain this far from the night's is replaced
 GLUE_REF_MIN_R2 = 0.95           # only fits this good define the night's gain; worse ones are replaced
+
+# A dense cloud overloads the analog chain, and the analog does not recover at
+# once: 2026-09-14 19:30 (parallel, cloud 2.28-2.60 km) the analog stays up to 2x
+# above the photon signal for ~0.8 km behind the cloud and then undershoots below
+# the pretrigger baseline (-0.01 mV at 4-15 km, hundreds of sigma). The 2-10 MHz
+# glue bins sit exactly there, so the per-bin gain came out 20-57 instead of ~87.
+# Glue bins are therefore taken only below the first dense cloud.
+GLUE_CLOUD_MIN_RANGE_M = 600.0   # below: the overlap rise can mimic a jump
+GLUE_CLOUD_SMOOTH_M = 90.0       # running median of the range-corrected analog
+GLUE_CLOUD_BELOW_M = 150.0       # level just below the test bin
+GLUE_CLOUD_JUMP_M = 300.0        # a peak within this distance above ...
+GLUE_CLOUD_JUMP_RATIO = 4.0      # ... at least this many times the level below
+GLUE_CLOUD_MIN_SNR = 5.0         # smoothed analog below the jump, in smoothed-noise units
+GLUE_CLOUD_OVERLOAD_MV = 100.0   # only a cloud whose analog peak (bg removed) reaches this
+                                 # upsets the analog behind it: 2026-09-14/15 parallel peaks
+                                 # 145-420 mV (gain 20-57); 2026-09-08 19:00 peak 80 mV and
+                                 # perpendicular peaks 9-66 mV kept clean fits (87 / 92-98).
+                                 # 100 mV = 20 % of the 500 mV input range used.
+
+
+# Analog saturation in the glued profile. The transient recorder sets a bin's
+# clip flag (the file's overflow dataset) when the ADC read 0 or full scale on at
+# least one shot, and then "the sum at these points may not correspond to the
+# physical mean value" (Licel TR manual, analog data structure; Ethernet
+# controller manual §9.2.3). No correction exists -- the manual's remedy is a
+# larger input range or a weaker signal, and 500 mV is already the largest
+# range. Behind a cloud that overloaded the analog (see glue_cloud_base_m) the
+# analog is also wrong without a flag: 2026-09-14 19:30 parallel, 2.64-2.88 km,
+# the glued (analog) profile read 21/31/25 MHz where the photon counter gave
+# 16/18/12 MHz. Wherever the glued profile leans on the analog (blend weight
+# < 1) in such a bin, the dead-time-corrected photon rate is used instead, when
+# the counter is still in its linear range; otherwise the bin is flagged.
+SAT_PEAK_SEARCH_M = 1000.0      # overload peak = analog maximum within this above the cloud base
+SAT_PHOTON_VALID_MAX_MHZ = 30.0  # raw rate: dead-time factor 1/(1-N*tau) = 1.10 at 3.06 ns and
+                                 # 1.17 at 4.8 ns, so the tau uncertainty costs < 7 % here
+SAT_OK, SAT_REPLACED_BY_PHOTON, SAT_INVALID, SAT_SUSPECT, SAT_DEADTIME_INVALID = 0, 1, 2, 3, 4
+# 1: analog clipped/recovering, photon used; 2: analog clipped AND photon beyond
+#    its linear range -- no valid estimate; 3: analog recovering, photon beyond
+#    its linear range -- analog kept but unverified; 4: the profile leans on the
+#    photon counter where the dead-time model no longer holds -- blanked (NaN).
+# The non-paralyzable correction S = N/(1 - N*tau) "fails when S*tau becomes larger
+# than one" (Licel manual §9.7.3; its example is valid up to 130 MHz). With the
+# measured tau = 4.8 ns a 200 MHz near-field count gives a factor of 25, which
+# then dominates the NRB normalisation. Daytime backgrounds reach N*tau = 0.69
+# (144 MHz) and still agree with the Mini-MPL (2026-09-08/14 day, CV 13-20 %).
+DT_VALID_MAX_FRACTION = 0.75    # N*tau above this: photon counting has no valid estimate
+
+
+def glue_cloud_base_m(
+    r_m: np.ndarray,
+    analog_raw: np.ndarray,
+    *,
+    bg_analog_mv: float,
+    analog_noise_mv: float,
+) -> float:
+    """Range of the first analog-overloading cloud, or NaN.
+
+    Tests the range-corrected, background-subtracted analog (running median over
+    GLUE_CLOUD_SMOOTH_M): the first bin beyond GLUE_CLOUD_MIN_RANGE_M whose peak
+    within the next GLUE_CLOUD_JUMP_M is GLUE_CLOUD_JUMP_RATIO times the level of
+    the GLUE_CLOUD_BELOW_M below it, and whose analog there reaches
+    GLUE_CLOUD_OVERLOAD_MV. The test fires up to GLUE_CLOUD_JUMP_M before the
+    cloud base, which errs on the safe side for the glue.
+    """
+    r = np.asarray(r_m, float)
+    a = np.asarray(analog_raw, float)
+    if r.size < 10 or not np.isfinite(bg_analog_mv):
+        return np.nan
+    dr = float(np.nanmedian(np.diff(r)))
+    if not np.isfinite(dr) or dr <= 0:
+        return np.nan
+    n_s = max(1, int(round(GLUE_CLOUD_SMOOTH_M / dr)))
+    n_b = max(1, int(round(GLUE_CLOUD_BELOW_M / dr)))
+    n_j = max(1, int(round(GLUE_CLOUD_JUMP_M / dr)))
+    sig = pd.Series(a - float(bg_analog_mv)).rolling(n_s, center=True, min_periods=1).median()
+    rc = sig * r ** 2
+    below = rc.rolling(n_b, min_periods=1).median().shift(1)
+    above = rc[::-1].rolling(n_j, min_periods=1).max()[::-1]
+    sig_above = sig[::-1].rolling(n_j, min_periods=1).max()[::-1]
+    sig_below = sig.rolling(n_b, min_periods=1).median().shift(1)
+    noise = float(analog_noise_mv) if np.isfinite(analog_noise_mv) and analog_noise_mv > 0 else 0.0
+    noise_s = noise / np.sqrt(n_s)
+    hit = ((r >= GLUE_CLOUD_MIN_RANGE_M)
+           & (below.to_numpy() > 0)
+           & (sig_below.to_numpy() > GLUE_CLOUD_MIN_SNR * noise_s)
+           & (sig_above.to_numpy() >= GLUE_CLOUD_OVERLOAD_MV)
+           & (above.to_numpy() >= GLUE_CLOUD_JUMP_RATIO * below.to_numpy()))
+    idx = np.flatnonzero(hit)
+    return float(r[idx[0]]) if idx.size else np.nan
 
 
 def robust_glue_gain(
@@ -665,6 +827,7 @@ def robust_glue_gain(
     bg_analog_mv: float,
     bg_photon_mhz: float,
     analog_noise_mv: float,
+    r_m: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Median per-bin photon/analog gain over clean bins.
 
@@ -694,9 +857,13 @@ def robust_glue_gain(
     good = np.abs(g - med) <= GLUE_MAD_REJECT * mad if mad > 0 else np.ones(g.size, bool)
     if int(good.sum()) < GLUE_ROBUST_MIN_BINS:
         return out
+    idx = np.where(keep)[0][good]
+    if r_m is not None:
+        rr = np.asarray(r_m, float)[idx]
+        if rr.size and float(rr.max() - rr.min()) < GLUE_MIN_SPAN_M:
+            return out
     slope = float(np.median(g[good]))
     offset = float(bg_photon_mhz - slope * bg_analog_mv)
-    idx = np.where(keep)[0][good]
     yhat = slope * a[idx] + offset
     ss_res = float(np.sum((y[idx] - yhat) ** 2))
     ss_tot = float(np.sum((y[idx] - np.mean(y[idx])) ** 2))
@@ -740,6 +907,8 @@ def compute_nrb_reference_glue(
     bg_pretrigger_analog_mv: float = np.nan,
     analog_noise_mv: float = np.nan,
     glue_gain_override: Optional[float] = None,
+    saturation_handling: bool = True,
+    mask_saturated_invalid: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, float], Dict[str, np.ndarray]]:
     r = np.asarray(r_m, float)
     analog_raw = np.asarray(analog_raw, float)
@@ -789,6 +958,7 @@ def compute_nrb_reference_glue(
     fit_rmse = np.nan
     n_fit = 0
     fit_mode = "toggle_window"
+    glue_cloud_m = np.nan              # first dense cloud seen by the analog (robust glue)
     blend_r1_used = float(blend_r1_m)
     blend_r2_used = float(blend_r2_m)
     auto_ok = 0.0
@@ -842,15 +1012,22 @@ def compute_nrb_reference_glue(
             # proportional per-bin gain drops to r2 0.74-0.87 and trips the
             # daytime quality guard into photon-only.
             bg_p_for_gain = float(bg_pretrigger_photon_mhz)
+            glue_cloud_m = glue_cloud_base_m(
+                r, analog_raw, bg_analog_mv=float(bg_pretrigger_analog_mv),
+                analog_noise_mv=float(analog_noise_mv))
+            below_cloud = (r < glue_cloud_m) if np.isfinite(glue_cloud_m) else np.ones(r.shape, bool)
+            # A clipped bin's mean is not the physical mean (Licel TR manual): never fit it.
+            if saturation_mask is not None:
+                below_cloud &= ~np.asarray(saturation_mask, bool)
             for mode_name, hi_rate in (("robust_median_gain", float(max_toggle_rate)),):
-                cand = (sig_mask & np.isfinite(photon_toggle) & (~sat)
+                cand = (sig_mask & np.isfinite(photon_toggle) & (~sat) & below_cloud
                         & (photon_toggle >= float(min_toggle_rate))
                         & (photon_toggle <= hi_rate))
                 rg = robust_glue_gain(
                     analog_raw, photon_dt_mhz, cand,
                     bg_analog_mv=float(bg_pretrigger_analog_mv),
                     bg_photon_mhz=bg_p_for_gain,
-                    analog_noise_mv=float(analog_noise_mv))
+                    analog_noise_mv=float(analog_noise_mv), r_m=r)
                 if rg["n"] >= GLUE_ROBUST_MIN_BINS and np.isfinite(rg["slope"]) and rg["slope"] > 0:
                     slope, offset = rg["slope"], rg["offset"]
                     fit_quality_r2, fit_rmse, n_fit = rg["r2"], rg["rmse"], rg["n"]
@@ -918,6 +1095,44 @@ def compute_nrb_reference_glue(
         w = np.ones_like(r, dtype=float)
         glued_profile = photon_dt_mhz.copy()
 
+    # ── Analog saturation (see SAT_* above) ─────────────────────────────────
+    saturation_state = np.zeros(r.shape, dtype=np.int8)
+    overload_peak_m = np.nan
+    n_sat_replaced = n_sat_invalid = n_sat_suspect = 0
+    if saturation_handling and np.any(w < 1.0):
+        clipped = (np.asarray(saturation_mask, bool) if saturation_mask is not None
+                   else np.zeros(r.shape, bool))
+        recovering = np.zeros(r.shape, bool)
+        if np.isfinite(bg_pretrigger_analog_mv):
+            cb = glue_cloud_base_m(r, analog_raw, bg_analog_mv=float(bg_pretrigger_analog_mv),
+                                   analog_noise_mv=float(analog_noise_mv))
+            if np.isfinite(cb):
+                win = (r >= cb) & (r <= cb + SAT_PEAK_SEARCH_M) & np.isfinite(analog_raw)
+                if win.any():
+                    overload_peak_m = float(r[win][np.argmax(analog_raw[win])])
+                    recovering = r > overload_peak_m
+        uses_analog = sig_mask & (w < 1.0)
+        photon_ok = np.isfinite(photon_rate_mhz) & (photon_rate_mhz <= SAT_PHOTON_VALID_MAX_MHZ)
+        bad_analog = uses_analog & (clipped | recovering)
+        repl = bad_analog & photon_ok
+        invalid = uses_analog & clipped & ~photon_ok
+        suspect = bad_analog & ~clipped & ~photon_ok
+        glued_profile = np.where(repl, photon_dt_mhz, glued_profile)
+        saturation_state[repl] = SAT_REPLACED_BY_PHOTON
+        saturation_state[invalid] = SAT_INVALID
+        saturation_state[suspect] = SAT_SUSPECT
+        if mask_saturated_invalid:
+            glued_profile = np.where(invalid, np.nan, glued_profile)
+        n_sat_replaced, n_sat_invalid, n_sat_suspect = int(repl.sum()), int(invalid.sum()), int(suspect.sum())
+
+    # Photon counting beyond the dead-time model, where the profile uses it (w > 0).
+    beyond_dt = (sig_mask & (w > 0.0) & np.isfinite(photon_rate_mhz)
+                 & (photon_rate_mhz * float(dead_time_ns) * 1e-3 >= DT_VALID_MAX_FRACTION))
+    if saturation_handling and beyond_dt.any():
+        glued_profile = np.where(beyond_dt, np.nan, glued_profile)
+        saturation_state[beyond_dt] = SAT_DEADTIME_INVALID
+    n_dt_invalid = int(beyond_dt.sum()) if saturation_handling else 0
+
     bg_glued = float(bg_pretrigger_photon_mhz)
     glued_bgsub = glued_profile - bg_glued
 
@@ -983,6 +1198,7 @@ def compute_nrb_reference_glue(
         "fit_rmse": float(fit_rmse) if np.isfinite(fit_rmse) else np.nan,
         "n_toggle_points": float(n_fit),
         "glue_fit_mode": fit_mode,
+        "glue_cloud_base_m": float(glue_cloud_m),
         "bg_glued": float(bg_glued),
         "energy_mj": float(energy_mj),
         "sig_start_m": float(sig_start_m),
@@ -1007,8 +1223,14 @@ def compute_nrb_reference_glue(
         "afterpulse_applied": 1.0 if afterpulse_applied else 0.0,
         "exclude_saturated": 1.0 if (exclude_saturated and saturation_mask is not None) else 0.0,
         "saturated_bins_excluded": float(n_saturated_excluded),
+        "overload_peak_m": float(overload_peak_m),
+        "sat_bins_replaced": float(n_sat_replaced),
+        "sat_bins_invalid": float(n_sat_invalid),
+        "sat_bins_suspect": float(n_sat_suspect),
+        "deadtime_invalid_bins": float(n_dt_invalid),
     }
     inter = {
+        "saturation_state": saturation_state,
         "analog_raw_mV": analog_raw,
         "photon_raw_mhz": photon_rate_mhz,
         "photon_shifted_mhz": photon_shifted,
@@ -1052,7 +1274,7 @@ def build_single_profile(
     path: Path,
     *,
     dr_m: float = 3.75,
-    dead_time_ns: float = 3.06,
+    dead_time_ns: float = DEFAULT_DEAD_TIME_NS,
     bg_mode: str = "pretrigger",
     bg_start_m: float = 0.0,
     bg_end_m: float = 3750.0,
@@ -1071,8 +1293,8 @@ def build_single_profile(
     onset_smooth_bins: int = 5,
     sig_start_m: float = 0.0,
     sig_end_m: float = 15000.0,
-    min_toggle_rate: float = 0.5,
-    max_toggle_rate: float = 10.0,
+    min_toggle_rate: float = NIGHT_MIN_TOGGLE_MHZ,
+    max_toggle_rate: float = NIGHT_MAX_TOGGLE_MHZ,
     auto_toggle_selector: bool = True,
     day_min_toggle_rate: float = 75.0,
     day_max_toggle_rate: float = 130.0,
@@ -1096,6 +1318,9 @@ def build_single_profile(
     exclude_saturated: bool = False,
     glue_fit: str = "robust",
     glue_gain_override: Optional[float] = None,
+    saturation_handling: bool = True,
+    mask_saturated_invalid: bool = False,
+    force_photon_only: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     raw_df = read_tr40_dat_ascii(
         path,
@@ -1208,6 +1433,9 @@ def build_single_profile(
         # photon-only when the analog has degraded (full daylight). Night: normal glue.
         gluing_mode_eff = "auto_bgsub_guarded" if is_day else "auto"
         day_night_pick = ("day_glue_bgsub" if is_day else "night_glue")
+    if force_photon_only:
+        # Caller found the analog unusable for this channel (PMT over-current).
+        gluing_mode_eff = "photon_only"
     gluing_mode = gluing_mode_eff
 
     nrb_norm, qc, inter = compute_nrb_reference_glue(
@@ -1242,6 +1470,8 @@ def build_single_profile(
         bg_pretrigger_analog_mv=bg_pre_analog_mv,
         analog_noise_mv=analog_noise_mv,
         glue_gain_override=glue_gain_override,
+        saturation_handling=saturation_handling,
+        mask_saturated_invalid=mask_saturated_invalid,
     )
 
     out = raw_df[["range_m", "source_bin_index", "analog_mV", "photon_MHz"]].copy()
@@ -1281,8 +1511,23 @@ def build_single_profile(
     out["photon_stderr_MHz"] = photon_stderr           # raw σ_µ from the file (unchanged)
     out["photon_stderr_dt_MHz"] = photon_stderr_dt      # dead-time-propagated σ_µ
     out["snr"] = snr
+    out["saturation_state"] = inter["saturation_state"]
+
+    # Analog level checks (PMT manual §5.1-5.2): the pretrigger analog level is the
+    # dark offset plus the DC from sky light; the peak is judged against the range.
+    analog_range_mv = read_analog_input_range_mv(path, channel)
+    in_sig = (r >= float(sig_start_m)) & (r <= float(sig_end_m)) & np.isfinite(analog)
+    analog_peak_mv = (float(np.max(analog[in_sig] - bg_pre_analog_mv))
+                      if np.isfinite(bg_pre_analog_mv) and in_sig.any() else np.nan)
+    peak_over_half = (float(analog_peak_mv > ANALOG_PEAK_MAX_FRACTION * analog_range_mv)
+                      if np.isfinite(analog_peak_mv) and np.isfinite(analog_range_mv) else np.nan)
 
     meta: Dict[str, float] = {
+        "bg_analog_mv": float(bg_pre_analog_mv),
+        "analog_noise_mv": float(analog_noise_mv),
+        "analog_peak_mv": analog_peak_mv,
+        "analog_range_mv": float(analog_range_mv),
+        "analog_peak_over_half_range": peak_over_half,
         "bin_spacing_m": dr_eff,
         "bin_width_ns": float(bin_width_ns),
         "bg_mode_used": bg_mode_l,
@@ -1325,6 +1570,12 @@ def build_single_profile(
         "fit_rmse": float(qc["fit_rmse"]),
         "n_toggle_points": int(round(qc["n_toggle_points"])),
         "glue_fit_mode": str(qc.get("glue_fit_mode", "")),
+        "glue_cloud_base_m": float(qc.get("glue_cloud_base_m", np.nan)),
+        "overload_peak_m": float(qc.get("overload_peak_m", np.nan)),
+        "sat_bins_replaced": float(qc.get("sat_bins_replaced", 0.0)),
+        "sat_bins_invalid": float(qc.get("sat_bins_invalid", 0.0)),
+        "sat_bins_suspect": float(qc.get("sat_bins_suspect", 0.0)),
+        "deadtime_invalid_bins": float(qc.get("deadtime_invalid_bins", 0.0)),
         "bg_glued": float(qc["bg_glued"]),
         "energy_mj": float(energy_mj),
         "auto_blend": bool(auto_blend),
@@ -1572,7 +1823,7 @@ def build_daily_profile_from_folder(
     start_time: str = "",
     recursive: bool = False,
     dr_m: float = 3.75,
-    dead_time_ns: float = 3.06,
+    dead_time_ns: float = DEFAULT_DEAD_TIME_NS,
     bg_mode: str = "pretrigger",
     bg_start_m: float = 0.0,
     bg_end_m: float = 3750.0,
@@ -1591,8 +1842,8 @@ def build_daily_profile_from_folder(
     onset_smooth_bins: int = 5,
     sig_start_m: float = 0.0,
     sig_end_m: float = 15000.0,
-    min_toggle_rate: float = 0.5,
-    max_toggle_rate: float = 10.0,
+    min_toggle_rate: float = NIGHT_MIN_TOGGLE_MHZ,
+    max_toggle_rate: float = NIGHT_MAX_TOGGLE_MHZ,
     auto_toggle_selector: bool = True,
     day_min_toggle_rate: float = 75.0,
     day_max_toggle_rate: float = 130.0,

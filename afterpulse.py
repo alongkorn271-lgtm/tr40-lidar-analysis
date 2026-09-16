@@ -38,7 +38,7 @@ def compute_afterpulse_from_dat(
     dat_path: Union[str, Path],
     *,
     dr_m: float = 3.75,
-    dead_time_ns: float = 3.06,
+    dead_time_ns: float = 4.8,   # nrb_engine.DEFAULT_DEAD_TIME_NS
     pretrigger_bins: int = 1024,
     first_signal_bin: Optional[int] = None,
     first_signal_range_m: float = 3.75,
@@ -170,7 +170,7 @@ def get_afterpulse(
     file_path: Optional[Union[str, Path]] = None,
     *,
     dr_m: float = 3.75,
-    dead_time_ns: float = 3.06,
+    dead_time_ns: float = 4.8,   # nrb_engine.DEFAULT_DEAD_TIME_NS
     pretrigger_bins: int = 1024,
     first_signal_bin: Optional[int] = None,
     first_signal_range_m: float = 3.75,

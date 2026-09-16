@@ -1092,7 +1092,7 @@ class Step2Page(ctk.CTkFrame):
         self.out_path = tk.StringVar()
 
         self.bin_spacing_m = tk.DoubleVar(value=3.75)
-        self.dead_time_ns = tk.DoubleVar(value=3.06)
+        self.dead_time_ns = tk.DoubleVar(value=4.8)
         self.bg_mode = tk.StringVar(value="pretrigger")
         self.bg_start_m = tk.DoubleVar(value=0.0)
         self.bg_end_m = tk.DoubleVar(value=3750.0)
@@ -1105,8 +1105,8 @@ class Step2Page(ctk.CTkFrame):
         # auto-blend descending crossing is never found and it silently falls back
         # to the manual blend_r1/r2. max 10.0 keeps dead-time correction at ~3%.
         # Kept identical to Step 3 so both steps give the same result by default.
-        self.min_toggle_rate = tk.DoubleVar(value=2.0)
-        self.max_toggle_rate = tk.DoubleVar(value=10.0)
+        self.min_toggle_rate = tk.DoubleVar(value=10.0)   # nrb_engine.NIGHT_MIN_TOGGLE_MHZ
+        self.max_toggle_rate = tk.DoubleVar(value=40.0)   # nrb_engine.NIGHT_MAX_TOGGLE_MHZ
         self.auto_toggle_selector = tk.BooleanVar(value=True)
         self.day_min_toggle_rate = tk.DoubleVar(value=75.0)
         self.day_max_toggle_rate = tk.DoubleVar(value=130.0)
@@ -1896,7 +1896,7 @@ class Step2Page(ctk.CTkFrame):
         if name == "Licel pretrigger 1024":
             self.bg_mode.set("pretrigger"); self.pretrigger_bins.set(1024); self.first_signal_bin.set(1025)
             self.first_signal_range_m.set(3.75); self.blend_r1_m.set(1200.0); self.blend_r2_m.set(1800.0)
-            self.min_toggle_rate.set(2.0); self.max_toggle_rate.set(10.0)
+            self.min_toggle_rate.set(10.0); self.max_toggle_rate.set(40.0)
             self.day_min_toggle_rate.set(75.0); self.day_max_toggle_rate.set(130.0)
             self.toggle_bg_switch_threshold_mhz.set(10.0); self.pretrigger_trim_bins.set(24)
             self.sig_start_m.set(0.0); self.sig_end_m.set(15000.0); self.energy_mj.set(25.0)
@@ -1906,7 +1906,7 @@ class Step2Page(ctk.CTkFrame):
             self.first_signal_range_m.set(3.75); self.bin_shift_bins.set(0)
             self.bg_start_m.set(13000.0); self.bg_end_m.set(14500.0)
             self.blend_r1_m.set(1200.0); self.blend_r2_m.set(1800.0)
-            self.min_toggle_rate.set(2.0); self.max_toggle_rate.set(10.0)
+            self.min_toggle_rate.set(10.0); self.max_toggle_rate.set(40.0)
             self.day_min_toggle_rate.set(75.0); self.day_max_toggle_rate.set(130.0)
             self.toggle_bg_switch_threshold_mhz.set(10.0); self.pretrigger_trim_bins.set(0)
             self.sig_start_m.set(0.0); self.sig_end_m.set(15000.0); self.energy_mj.set(25.0)
@@ -6835,17 +6835,17 @@ class Step6Page(ctk.CTkFrame):
         #    STANDALONE for a single-channel experiment without touching Step 2.
         #    All of these are forwarded to build_single_profile via nrb_kwargs.
         self.bin_spacing_m        = tk.DoubleVar(value=3.75)
-        self.dead_time_ns         = tk.DoubleVar(value=3.06)
+        self.dead_time_ns         = tk.DoubleVar(value=4.8)   # measured, see nrb_engine.DEFAULT_DEAD_TIME_NS
         self.bg_mode              = tk.StringVar(value="pretrigger")
         self.first_signal_bin     = tk.IntVar(value=1025)
         self.first_signal_range_m = tk.DoubleVar(value=3.75)
         self.pretrigger_trim_bins = tk.IntVar(value=24)
         self.bg_start_m           = tk.DoubleVar(value=0.0)
         self.bg_end_m             = tk.DoubleVar(value=3750.0)
-        # Toggle window: min 2.0 = ~2x the photon floor so the auto-blend descending
-        # crossing exists; max 10.0 keeps the dead-time correction at ~3% (tau=3.06 ns).
-        self.min_toggle_rate      = tk.DoubleVar(value=2.0)
-        self.max_toggle_rate      = tk.DoubleVar(value=10.0)
+        # Night toggle window 10-40 MHz: where analog and photon are both linear
+        # (flat glue gain, measured 2026-09-15; see nrb_engine.NIGHT_MIN/MAX_TOGGLE_MHZ).
+        self.min_toggle_rate      = tk.DoubleVar(value=10.0)
+        self.max_toggle_rate      = tk.DoubleVar(value=40.0)
         self.auto_toggle_selector = tk.BooleanVar(value=True)
         self.day_min_toggle_rate  = tk.DoubleVar(value=75.0)
         self.day_max_toggle_rate  = tk.DoubleVar(value=130.0)
@@ -6856,13 +6856,30 @@ class Step6Page(ctk.CTkFrame):
         self.sig_start_m          = tk.DoubleVar(value=0.0)
         self.sig_end_m            = tk.DoubleVar(value=15000.0)
         self.preset_name          = tk.StringVar(value="Custom")
-        self.delta_mol_mode = tk.StringVar(value="Narrowband (0.0044)")
-        self.delta_mol    = tk.DoubleVar(value=0.0044)
+        # delta_mol follows the RECEIVER FILTER WIDTH: the first rotational-Raman
+        # lines sit only 0.338 nm (N2) / 0.407 nm (O2) from 532 nm and are 75 %
+        # depolarized, so a wider filter raises delta_mol from 0.0036 (Cabannes
+        # only) to 0.0144 (all Raman). Our receiver has a 1 nm filter -> 0.0042.
+        self.delta_mol_mode = tk.StringVar(value="Filter 1 nm (0.0042)")
+        self.delta_mol    = tk.DoubleVar(value=0.0042)
         self.cal_rmin_m   = tk.DoubleVar(value=4500.0)
         self.cal_rmax_m   = tk.DoubleVar(value=5500.0)
         self.snr_min      = tk.DoubleVar(value=3.0)   # mask δ where cross SNR below this
         # Files with fewer shots are aborted acquisitions and are not processed.
         self.min_shots    = tk.DoubleVar(value=1500.0)
+        # Glue gain for a night with < 2 clean fits (cloudy); blank disables.
+        self.fallback_gain_par  = tk.StringVar(value="87")
+        self.fallback_gain_perp = tk.StringVar(value="96")
+        # Analog clip flag / overload recovery: use photon there (default ON);
+        # blank bins with no valid estimate (default OFF: Step 3 clouds need the peak).
+        self.sat_handling = tk.BooleanVar(value=True)
+        self.sat_mask_invalid = tk.BooleanVar(value=False)
+        # PMT anode current (Licel PMT manual §5.1): pretrigger analog − dark offset
+        # must stay below 5 mV (100 µA); over it the analog is dropped (photon only).
+        self.pmt_check = tk.BooleanVar(value=True)
+        self.pmt_max_dc_mv = tk.StringVar(value="5.0")
+        self.dark_offset_par = tk.StringVar(value="")    # blank = night pretrigger median
+        self.dark_offset_perp = tk.StringVar(value="")
         self.snr_gate     = tk.BooleanVar(value=True)   # gate NRB co/cross by SNR (default ON)
         # Repair the photon StErr when the recorder's squared data is corrupt
         # (32-bit overflow at high shots x high count rates — the 30 m / 300 s
@@ -7200,9 +7217,11 @@ class Step6Page(ctk.CTkFrame):
            row=0, column=0, sticky="w")
         cb(f, "Auto day/night glue: day → photon only, night → glue (overrides Skip glue)",
            self.glue_auto_daynight, row=1, column=0, sticky="w", pady=(6, 0))
-        note("max_toggle = ε/τ_d (10 MHz → 3% dead-time correction at τ=3.06 ns; the "
-             "Licel model fails near 326 MHz). min_toggle must sit ABOVE the photon "
-             "floor or the auto-blend crossing is never found (0.5 is below it — use ~2).")
+        note("Toggle window = where analog and photon are BOTH linear, i.e. the glue gain "
+             "photon/analog is flat. Measured 2026-09-15 (τ = 4.8 ns): flat within ±1 % from "
+             "10 to 40 MHz. Below ~10 MHz the analog baseline error bends the gain; above "
+             "~40 MHz the dead-time residual does. Licel's glue VI defaults to 1–10 MHz with "
+             "an uncalibrated 3.0 ns. Re-measure after changing PMT, HV, discriminator or τ.")
 
         # ── 4. Corrections: afterpulse -> overlap -> energy ────────────────
         sub("4 · Corrections (afterpulse → overlap → R² → energy)")
@@ -7279,6 +7298,59 @@ class Step6Page(ctk.CTkFrame):
         ctk.CTkEntry(ms, textvariable=self.min_shots, width=80, **theme.input_style()).pack(side="left")
         ctk.CTkLabel(ms, text="(aborted acquisitions: duplicate HH:MM columns, bias the night glue gain; 0 = keep all)",
                      font=theme.F_TINY, text_color=theme.TEXT_MUTED).pack(side="left", padx=(8, 0))
+        fg = ctk.CTkFrame(f, fg_color="transparent")
+        fg.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(fg, text="Fallback glue gain  ∥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(fg, textvariable=self.fallback_gain_par, width=60, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(fg, text="⊥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(10, 6))
+        ctk.CTkEntry(fg, textvariable=self.fallback_gain_perp, width=60, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(fg, text="MHz/mV (used only when a night has < 2 clean glue fits, e.g. a cloudy night; "
+                              "blank = off. C01 3.75 m at HV 750 V: 87 / 96; C02 30 m: ~90 / 97)",
+                     font=theme.F_TINY, text_color=theme.TEXT_MUTED).pack(side="left", padx=(8, 0))
+        cb(f, "Analog saturation: use photon where the analog clipped (Licel overflow flag) "
+              "or is recovering behind an overloading cloud",
+           self.sat_handling, row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        cb(f, "   … and blank (NaN) bins where the photon counter is saturated too (no valid estimate)",
+           self.sat_mask_invalid, row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ctk.CTkLabel(
+            f,
+            text="The recorder flags a bin when the ADC hit its limit on any shot; that mean is not "
+                 "the physical signal (Licel TR manual). Behind a cloud that drove the analog past "
+                 "~100 mV the analog also reads high, then undershoots. Photon (≤ 30 MHz raw) replaces "
+                 "those bins. Bins where both channels are saturated are marked 2 in the "
+                 "Saturation_par/perp sheets; blanking them hides cloud peaks from Step 3, so it is off.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED,
+            justify="left", wraplength=760,
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        cb(f, "PMT current check: drop the analog (photon only) when the pretrigger level exceeds "
+              "the dark offset by more than the limit",
+           self.pmt_check, row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        pm = ctk.CTkFrame(f, fg_color="transparent")
+        pm.grid(row=12, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ctk.CTkLabel(pm, text="Limit (mV):", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(pm, textvariable=self.pmt_max_dc_mv, width=55, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(pm, text="Dark offset ∥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(12, 6))
+        ctk.CTkEntry(pm, textvariable=self.dark_offset_par, width=60, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(pm, text="⊥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(10, 6))
+        ctk.CTkEntry(pm, textvariable=self.dark_offset_perp, width=60, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(pm, text="mV (blank = median pretrigger of the run's night profiles)",
+                     font=theme.F_TINY, text_color=theme.TEXT_MUTED).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            f,
+            text="Licel PMT manual §5.1: the average anode current must never exceed 100 µA = 5 mV analog; "
+                 "above it the tube's protection clamps and the data are not meaningful. The pretrigger "
+                 "analog = electronics dark offset (~5.6–6.0 mV here) + DC from sky light. At midday on "
+                 "2026-09-08/14/15 the sky DC was 6.5–9.7 mV and the analog gain fell to 0.1–0.3 of the "
+                 "night's. QC_calibration: par/perp_bg_analog_mv, _solar_dc_mv, _pmt_overcurrent, and "
+                 "_analog_peak_over_half_range (§5.2: keep the peak below half the input range).",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED,
+            justify="left", wraplength=760,
+        ).grid(row=13, column=0, columnspan=3, sticky="w", pady=(2, 0))
         cb(f, "Normalise NRB co/cross in the lower troposphere (BL → 1.0, full curve, no cut)",
            self.snr_gate, row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         cb(f, "Repair corrupt photon StErr with the Poisson shot-noise estimate "
@@ -7316,7 +7388,8 @@ class Step6Page(ctk.CTkFrame):
         ctk.CTkLabel(f, text="δ_mol (532 nm):", font=theme.F_SMALL,
                      text_color=theme.TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 8))
         menu(f, self.delta_mol_mode,
-             ["Narrowband (0.0044)", "Broadband (0.0144)", "Custom"],
+             ["Filter 1 nm (0.0042)", "Filter ≤0.5 nm (0.0036)", "Filter 2 nm (0.0058)",
+              "Broadband (0.0144)", "Custom"],
              command=lambda _v: self._update_delta_mol_ui(), width=200,
              row=0, column=1, sticky="w")
         f = frame()
@@ -7328,9 +7401,13 @@ class Step6Page(ctk.CTkFrame):
         f = frame(cols=2)
         FieldRow(f, "cal R_min (m)", self.cal_rmin_m).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         FieldRow(f, "cal R_max (m)", self.cal_rmax_m).grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        note("Narrowband (filter rejects rotational-Raman wings) = 0.0044; broadband = "
-             "0.0144 (Behrendt & Nakamura 2002). The cal window is assumed aerosol-free "
-             "(purely molecular): C = ⟨δ*⟩_clean / δ_mol. Typical 4000–6000 m at night.",
+        note("δ_mol is set by the receiver's interference filter, not by the laser: the first "
+             "rotational-Raman lines lie 0.338 nm (N₂) / 0.407 nm (O₂) from 532 nm and are 75 % "
+             "depolarized, so a wider filter raises δ_mol. Computed here and checked against "
+             "Behrendt & Nakamura 2002 (0.2–0.5 nm → 0.0036–0.0038; all Raman → 0.0144): "
+             "0.5 nm → 0.0036, 1 nm → 0.0042, 2 nm → 0.0058, 3 nm → 0.0080. This receiver uses a "
+             "1 nm filter (both channels share it, before the polarizing beamsplitter). δ scales "
+             "with this value. The cal window is assumed aerosol-free: C = ⟨δ*⟩_clean / δ_mol.",
              pady=(0, 8))
 
         self._update_corr_ui()
@@ -7361,11 +7438,11 @@ class Step6Page(ctk.CTkFrame):
         else:
             return
         self.blend_r1_m.set(1200.0); self.blend_r2_m.set(1800.0)
-        self.min_toggle_rate.set(2.0); self.max_toggle_rate.set(10.0)
+        self.min_toggle_rate.set(10.0); self.max_toggle_rate.set(40.0)
         self.day_min_toggle_rate.set(75.0); self.day_max_toggle_rate.set(130.0)
         self.toggle_bg_switch_threshold_mhz.set(10.0)
         self.sig_start_m.set(0.0); self.sig_end_m.set(15000.0)
-        self.dead_time_ns.set(3.06)
+        self.dead_time_ns.set(4.8)
         self.preset_name.set(name)
         self._log(f"Preset applied: {name} (bin={bw:g} m, pretrigger="
                   f"{int(self.pretrigger_bins.get())} bins)")
@@ -7579,8 +7656,14 @@ class Step6Page(ctk.CTkFrame):
 
     def _update_delta_mol_ui(self):
         mode = self.delta_mol_mode.get()
-        if mode.startswith("Narrowband"):
-            self.delta_mol.set(0.0044)
+        if mode.startswith("Filter 1 nm"):
+            self.delta_mol.set(0.0042)
+            self._dm_entry.configure(state="disabled")
+        elif mode.startswith("Filter ≤0.5"):
+            self.delta_mol.set(0.0036)
+            self._dm_entry.configure(state="disabled")
+        elif mode.startswith("Filter 2 nm"):
+            self.delta_mol.set(0.0058)
             self._dm_entry.configure(state="disabled")
         elif mode.startswith("Broadband"):
             self.delta_mol.set(0.0144)
@@ -7662,6 +7745,11 @@ class Step6Page(ctk.CTkFrame):
             o_min = float(self.overlap_o_min.get())
             snr_min_val = float(self.snr_min.get())
             min_shots_val = float(self.min_shots.get())
+            fb_par = float(self.fallback_gain_par.get()) if self.fallback_gain_par.get().strip() else None
+            fb_perp = float(self.fallback_gain_perp.get()) if self.fallback_gain_perp.get().strip() else None
+            pmt_lim = float(self.pmt_max_dc_mv.get())
+            off_par = float(self.dark_offset_par.get()) if self.dark_offset_par.get().strip() else None
+            off_perp = float(self.dark_offset_perp.get()) if self.dark_offset_perp.get().strip() else None
         except Exception:
             messagebox.showerror("Error", "Invalid numeric parameter.")
             return
@@ -7779,6 +7867,13 @@ class Step6Page(ctk.CTkFrame):
                     afterpulse_co=ap_co_arr, afterpulse_cross=ap_cr_arr,
                     snr_min=snr_min_val, snr_gate=bool(self.snr_gate.get()),
                     min_shots=min_shots_val,
+                    fallback_glue_gain_par=fb_par,
+                    fallback_glue_gain_perp=fb_perp,
+                    saturation_handling=bool(self.sat_handling.get()),
+                    mask_saturated_invalid=bool(self.sat_mask_invalid.get()),
+                    pmt_current_check=bool(self.pmt_check.get()),
+                    pmt_max_dc_mv=pmt_lim,
+                    dark_offset_par_mv=off_par, dark_offset_perp_mv=off_perp,
                     single_channel=single,
                     dual_channel_file=dual,
                     # Full raw-processing parameters (forwarded to build_single_profile
@@ -8295,6 +8390,7 @@ class Step7Page(ctk.CTkFrame):
         self.snr_min = tk.DoubleVar(value=3.0)
         self.time_filter = tk.StringVar(value="night")
         self.match_tol_min = tk.DoubleVar(value=5.0)
+        self.cloud_screen = tk.BooleanVar(value=True)   # compare below MPL cloud base only
         # Profile filters: drop aborted short files; day/night from the signal.
         self.min_shots = tk.DoubleVar(value=1500.0)
         self.day_bg_mhz = tk.DoubleVar(value=10.0)
@@ -8496,6 +8592,21 @@ class Step7Page(ctk.CTkFrame):
             font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
             wraplength=520, justify="left",
         ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ctk.CTkCheckBox(
+            body, text="Cloud screen: compare only below the lowest MPL cloud base − 150 m",
+            variable=self.cloud_screen, font=theme.F_SMALL,
+        ).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(
+            body,
+            text="Inside a cloud the two receivers are not comparable (analog clipping, photon "
+                 "pile-up, field-of-view dependent multiple scattering) and above it the signal "
+                 "is attenuated and the analog is still recovering, so those bins would score "
+                 "the cloud, not the instrument. MPL clouds within ±5 min of the profile count."
+                 "EARLINET intercomparisons likewise exclude thick clouds (Wandinger et al. 2016). "
+                 "Untick to score the full window. Needs the MPL_clouds sheet from Step 1.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=5, column=0, sticky="w", pady=(2, 0))
         return card
 
     def _build_run_card(self, parent) -> "Card":
@@ -8718,6 +8829,7 @@ class Step7Page(ctk.CTkFrame):
                 min_shots=float(self.min_shots.get()),
                 day_bg_threshold_mhz=float(self.day_bg_mhz.get()),
                 day_glue_r2_min=float(self.day_glue_r2.get()),
+                cloud_screen=bool(self.cloud_screen.get()),
             )
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return
