@@ -909,6 +909,23 @@ def load_snr_profiles(path: Path, sheet: str = "SNR"):
     return r, out
 
 
+def load_saturation_states(path: Path, sheet: str = "Saturation_par"):
+    """Read Step 2's saturation flags (Range(m) + timestamp columns) -> (range, {slot: states}).
+
+    States (nrb_engine): 0 ok, 1 analog replaced by photon, 2 analog clipped AND
+    photon saturated, 3 analog recovering with the photon beyond its linear range,
+    4 photon beyond the dead-time model. 2 and 4 carry no valid estimate, so the
+    layer search must not see them as atmosphere."""
+    df = pd.read_excel(path, sheet_name=sheet)
+    r = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(float)
+    out: Dict[str, np.ndarray] = {}
+    for c in df.columns[1:]:
+        ts = pd.to_datetime(c, errors="coerce")
+        slot = ts.strftime("%H:%M") if pd.notna(ts) else str(c)
+        out[slot] = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+    return r, out
+
+
 def snr_trusted_top_m(r_m, snr, snr_min=3.0, smooth_bins=15):
     """Contiguous SNR-trusted-range top [m] from a SMOOTHED SNR profile (rolling
     median): walk UP from the peak-SNR bin until the smoothed SNR drops below
@@ -1068,6 +1085,9 @@ def main():
                     help="NRB vs depol ALT agreement tolerance (m, default 300)")
 
     # ── SNR-trusted-range cap (Track: signal quality) ─────────────────────────
+    ap.add_argument("--no_sat_mask", action="store_true",
+                    help="Keep bins Step 2 flagged as saturated (state 2) or beyond the "
+                         "dead-time model (state 4); by default they are blanked before the search")
     ap.add_argument("--snr_cap", action="store_true",
                     help="Cap the ALT search at the SNR-trusted range top (from the "
                          "SNR sheet) so the search never enters the noise floor")
@@ -1120,6 +1140,27 @@ def main():
         except Exception as e:
             print(f"[WARN] could not load SNR sheet '{args.snr_sheet}': {e} — snr_cap disabled")
             snr_map = {}
+
+    # Saturation flags from the same workbook: blank the bins that carry no valid
+    # estimate, so a clipped cloud top or a dead-time-invalid near field cannot be
+    # picked as a layer edge. Step 2 writes the sheet; older workbooks have none.
+    if not args.no_sat_mask:
+        try:
+            r_sat, sat_map = load_saturation_states(Path(args.nrb))
+            n_masked = 0
+            if np.allclose(np.asarray(r_sat, float)[:len(r_m)], r_m[:len(r_sat)], equal_nan=True):
+                for j, t_profile in enumerate(profile_times):
+                    st = sat_map.get(pd.Timestamp(t_profile).strftime("%H:%M"))
+                    if st is None or len(st) != mat_raw.shape[0]:
+                        continue
+                    bad = np.isin(st, (2.0, 4.0))
+                    n_masked += int(np.sum(bad & np.isfinite(mat_raw[:, j])))
+                    mat_raw[bad, j] = np.nan
+                print(f"[sat] blanked {n_masked} bin(s) flagged saturated / beyond dead time")
+            else:
+                print("[WARN] saturation sheet is on a different range grid — not applied")
+        except Exception as e:
+            print(f"[sat] no saturation sheet applied ({e})")
 
     # 1) Input_NRB_raw
     df_raw = pd.DataFrame(mat_raw, columns=profile_times)

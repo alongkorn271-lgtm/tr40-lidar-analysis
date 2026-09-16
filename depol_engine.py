@@ -64,6 +64,14 @@ from nrb_engine import (
 DELTA_MOL_532_NARROW = 0.0042
 DELTA_MOL_532_BROAD = 0.0144
 
+# The molecular calibration window only works if the WEAK cross channel actually
+# sees it. Measured in the 4.5-5.5 km window: 2026-09-08 (clear) gives a median
+# cross SNR of 1.1-1.6 and a stable C of 2.4-3.0 across the night, while
+# 2026-09-14/15 (deck at 1.3-3.2 km) give SNR <= 0.7 and C from -5928 to +194.
+# So a profile needs at least this much cross signal for its own C to mean
+# anything; the others take the night's median C, as the glue gain does.
+CAL_MIN_CROSS_SNR = 1.0
+
 # Range window (m) used to normalise the cross NRB profile to 0-1. The cross
 # channel's global max is usually a far-range R^2-amplified noise spike, so the
 # normaliser is the max within the lower troposphere (aerosol/BL region) — this
@@ -353,6 +361,10 @@ def compute_depolarization(
     cal_rmin_m: float = 4500.0,
     cal_rmax_m: float = 5500.0,
     min_par_signal: float = 1e-6,
+    snr_par: Optional[np.ndarray] = None,
+    snr_cross: Optional[np.ndarray] = None,
+    snr_min: float = CAL_MIN_CROSS_SNR,
+    min_cal_bins: int = 10,
 ) -> Dict[str, object]:
     """
     Compute the calibrated volume depolarization ratio profile.
@@ -371,6 +383,14 @@ def compute_depolarization(
       C          : calibration constant
       cal_ratio  : mean raw ratio in the calibration window
       n_cal      : number of bins used for calibration
+      cal_status : why the calibration was accepted or refused
+
+    The calibration assumes the window is clean air, so BOTH channels must
+    actually see it. Behind a cloud they do not: on 2026-09-14/15 the 4.5-5.5 km
+    window sat above a deck at 1.3-3.2 km and C came out anywhere from -5928 to
+    +194, yet delta was still computed from it and passed on to Steps 3, 5 and 6.
+    A window whose cross channel carries no signal (median SNR < snr_min), or too
+    few bins, or a non-positive C, now yields delta = NaN and a reason instead.
     """
     r = np.asarray(r_m, float)
     par = np.asarray(P_par, float)
@@ -381,14 +401,31 @@ def compute_depolarization(
 
     cal = (r >= float(cal_rmin_m)) & (r <= float(cal_rmax_m)) & np.isfinite(delta_star)
     n_cal = int(np.sum(cal))
-    if n_cal >= 3:
-        cal_ratio = float(np.nanmean(delta_star[cal]))
-        C = cal_ratio / float(delta_mol) if delta_mol > 0 else np.nan
-    else:
-        cal_ratio = np.nan
-        C = np.nan
 
-    if np.isfinite(C) and C > 0:
+    def _window_snr(snr) -> float:
+        if snr is None:
+            return np.nan
+        v = np.asarray(snr, float)[cal] if n_cal else np.array([])
+        v = v[np.isfinite(v)]
+        return float(np.median(v)) if v.size else np.nan
+
+    cal_par_snr, cal_cross_snr = _window_snr(snr_par), _window_snr(snr_cross)
+
+    cal_ratio = float(np.nanmean(delta_star[cal])) if n_cal else np.nan
+    C = (cal_ratio / float(delta_mol)) if (np.isfinite(cal_ratio) and delta_mol > 0) else np.nan
+
+    if n_cal < int(min_cal_bins):
+        cal_status = f"too few bins in the window ({n_cal} < {int(min_cal_bins)})"
+    elif np.isfinite(cal_cross_snr) and cal_cross_snr < float(snr_min):
+        cal_status = f"no cross signal in the window (SNR {cal_cross_snr:.1f} < {float(snr_min):g})"
+    elif np.isfinite(cal_par_snr) and cal_par_snr < float(snr_min):
+        cal_status = f"no parallel signal in the window (SNR {cal_par_snr:.1f} < {float(snr_min):g})"
+    elif not (np.isfinite(C) and C > 0):
+        cal_status = "C is not positive"
+    else:
+        cal_status = "ok"
+
+    if cal_status == "ok":
         delta_v = delta_star / C
     else:
         delta_v = np.full_like(r, np.nan)
@@ -399,6 +436,9 @@ def compute_depolarization(
         "C": C,
         "cal_ratio": cal_ratio,
         "n_cal": n_cal,
+        "cal_par_snr": cal_par_snr,
+        "cal_cross_snr": cal_cross_snr,
+        "cal_status": cal_status,
     }
 
 
@@ -520,6 +560,7 @@ def build_depol_for_pair(
     res = compute_depolarization(
         r, P_par, P_perp,
         delta_mol=delta_mol, cal_rmin_m=cal_rmin_m, cal_rmax_m=cal_rmax_m,
+        snr_par=snr_co, snr_cross=snr_cr, snr_min=CAL_MIN_CROSS_SNR,
     )
 
     # Mask delta where the WEAK cross channel is too noisy (cross SNR < snr_min).
@@ -585,6 +626,9 @@ def build_depol_for_pair(
         "C": res["C"],
         "cal_ratio": res["cal_ratio"],
         "n_cal": res["n_cal"],
+        "cal_par_snr": res["cal_par_snr"],
+        "cal_cross_snr": res["cal_cross_snr"],
+        "cal_status": res["cal_status"],
         "delta_mol": float(delta_mol),
         "cal_rmin_m": float(cal_rmin_m),
         "cal_rmax_m": float(cal_rmax_m),
@@ -682,6 +726,8 @@ def build_single_channel_for_file(
     })
     meta = {
         "C": np.nan, "cal_ratio": np.nan, "n_cal": 0,
+        "cal_par_snr": np.nan, "cal_cross_snr": np.nan,
+        "cal_status": "single-channel run (no delta)",
         "delta_mol": np.nan, "cal_rmin_m": np.nan, "cal_rmax_m": np.nan,
         "snr_min": float(snr_min), "snr_gate": 1.0 if snr_gate else 0.0,
         "co_trusted_range_m": float(trusted) if is_par else np.nan,
@@ -1001,6 +1047,64 @@ def build_daily_depol_from_folders(
                        f"up to {max(h[1] for h in hits):.0f} mV of {hits[0][2]:.0f} mV "
                        "(PMT manual §5.2: keep the peak below half the range)")
 
+    # Pass 4: C is an instrument constant (the gain ratio of the two PMTs), so a
+    # profile whose own calibration window was blocked by cloud takes the night's
+    # median C instead of publishing a delta built on noise.
+    if single is None:
+        okC = [m.get("C") for (_, _, _, _, d, m, err) in processed
+               if err is None and m.get("cal_status") == "ok" and np.isfinite(m.get("C", np.nan))]
+        C_night = float(np.median(okC)) if len(okC) >= 2 else np.nan
+        if np.isfinite(C_night):
+            n_over = 0
+            for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
+                if err is not None or meta.get("cal_status") == "ok":
+                    continue
+                if not {"delta_star", "snr_cross"} <= set(df.columns):
+                    continue
+                ds = df["delta_star"].to_numpy(float)
+                trust = np.isfinite(df["snr_cross"].to_numpy(float)) & (df["snr_cross"].to_numpy(float) >= float(snr_min))
+                dv = np.where(trust, ds / C_night, np.nan)
+                df = df.copy()
+                df["delta_v"] = dv
+                df["aerosol_type"] = [classify_aerosol(v) for v in dv]
+                meta = dict(meta)
+                meta["cal_status"] = "night_C_override"
+                meta["C_used"] = C_night
+                processed[i] = (ts, co_path, cr_path, key, df, meta, None)
+                n_over += 1
+            if logger and n_over:
+                logger(f"delta calibration: {n_over} profile(s) took the night's C = {C_night:.2f} "
+                       f"(from {len(okC)} profile(s) whose own window had cross signal)")
+        for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
+            if err is None and "C_used" not in meta:
+                meta = dict(meta); meta["C_used"] = meta.get("C") if meta.get("cal_status") == "ok" else np.nan
+                processed[i] = (ts, co_path, cr_path, key, df, meta, None)
+
+    # Depolarization calibration: say plainly how many profiles ended up with a
+    # usable C, and why the others did not (a cloud over the window is the usual
+    # reason). Without this the workbook carried delta computed from a C of 2.8
+    # or 194 with nothing to flag it.
+    if logger and single is None:
+        stat = [m.get("cal_status", "") for (_, _, _, _, d, m, err) in processed if err is None]
+        ok = [x for x in stat if x == "ok"]
+        used = [x for x in stat if x in ("ok", "night_C_override")]
+        logger(f"delta calibration: {len(used)}/{len(stat)} profile(s) have a delta "
+               f"({len(ok)} from their own window, {len(used) - len(ok)} from the night's C; "
+               f"window {cal_rmin_m:.0f}-{cal_rmax_m:.0f} m, delta_mol {delta_mol:g})")
+        if len(used) < len(stat):
+            why: Dict[str, int] = {}
+            for x in stat:
+                if x not in ("ok", "night_C_override"):
+                    why[x.split(" (")[0]] = why.get(x.split(" (")[0], 0) + 1
+            logger("   no delta: " + ", ".join(f"{k} x{v}" for k, v in sorted(why.items()))
+                   + " - left empty rather than computed from noise")
+        if ok:
+            cs = [m.get("C") for (_, _, _, _, d, m, err) in processed
+                  if err is None and m.get("cal_status") == "ok" and np.isfinite(m.get("C", np.nan))]
+            if cs:
+                logger(f"   C from the valid profiles: median {np.median(cs):.1f}, "
+                       f"spread {np.min(cs):.1f} to {np.max(cs):.1f}")
+
     for idx, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed, start=1):
         if err is not None:
             qc_rows.append({"key": key, "time": ts, "status": f"error: {err}",
@@ -1053,6 +1157,9 @@ def build_daily_depol_from_folders(
             **({"shots_cross": read_shots(cr_path)}
                if single is None and not dual_channel_file and cr_path != co_path else {}),
             "C": meta["C"], "cal_ratio": meta["cal_ratio"], "n_cal": meta["n_cal"],
+            "cal_cross_snr": meta.get("cal_cross_snr", np.nan),
+            "cal_status": meta.get("cal_status", ""),
+            "C_used": meta.get("C_used", np.nan),
             "snr_min": meta.get("snr_min", snr_min),
             "n_delta_trusted": meta.get("n_delta_trusted", np.nan),
             "cross_trusted_range_m": meta.get("cross_trusted_range_m", np.nan),

@@ -7907,10 +7907,14 @@ class Step6Page(ctk.CTkFrame):
                 self._snr_cross_df = res.get("snr_cross")
                 self._profiles_diag = res.get("profiles_diag", []) or []
                 n_ok = int((qc["status"] == "ok").sum()) if "status" in qc else len(qc)
-                cmean = float(pd.to_numeric(qc.get("C"), errors="coerce").mean()) if "C" in qc else float("nan")
+                # Report the C actually used (own window or the night's), not the
+                # mean of every raw C -- a cloud-blocked window produces values
+                # like -5928 that made the average meaningless.
+                _cu = pd.to_numeric(qc.get("C_used"), errors="coerce") if "C_used" in qc else pd.Series(dtype=float)
+                cmean = float(_cu.median()) if len(_cu.dropna()) else float("nan")
                 self._safe(self._populate_times)
                 self._safe(self._log,
-                           f"Depol done: {n_ok} pair(s) · mean C = {cmean:.3f} · "
+                           f"Depol done: {n_ok} pair(s) · C used (median) = {cmean:.2f} · "
                            f"δ_mol={dmol} · cal {cmin:.0f}-{cmax:.0f} m")
                 self._safe(self._log, f"[OK] Saved: {Path(out).resolve()}")
                 self._safe(self.progress.set, 100.0); self._safe(self.pb.set, 1.0)
@@ -8325,6 +8329,7 @@ VALIDATION_PLOT_MODES = [
     "4 · Depolarization vs range",
     "5 · Summary table",
     "6 · Per-profile (RTI lines)",
+    "7 · Layer height vs time",
 ]
 
 # What each view shows and how to read it — shown under the view selector.
@@ -8350,6 +8355,9 @@ VALIDATION_VIEW_HELP = {
           "เงาเทา = ส่วนต่าง · ตัวเลขด้านบน = % ของ bin ที่อยู่ใน ±20 % (เขียว ≥80 · ส้ม 50–80 · แดง <50)\n"
           "อ่านยังไง: หาคอลัมน์ที่เส้นแยกกันหรือตัวเลขแดง = profile ที่ดึงค่าเฉลี่ยให้แย่ (เช่นมีเมฆหรือเวลาไม่ตรง) · "
           "ช่วงที่เส้นขาด = bin ที่ถูกตัดเพราะ SNR ไม่ผ่าน"),
+    "7": ("กราฟ 7 · ความสูงของชั้นตามเวลา\n"
+          "จุดทึบ = ของเรา · จุดกลวง = ข้อมูล MPL คำนวณด้วยวิธีเดียวกัน · กากบาทเทา = ค่า PBL ที่ MPL รายงานเอง · เส้นประ = ฐานเมฆที่ใช้ตัด\n"
+          "อ่านยังไง: จุดทึบกับจุดกลวงควรอยู่ใกล้กัน (วัดได้ 210 m เมื่อ 15 ก.ย.) เพราะเป็นวิธีเดียวกันบนข้อมูลคนละเครื่อง · กากบาทเทามักอยู่สูงกว่ามาก เพราะ MPL นิยาม PBL คนละแบบ และตอนมีเมฆตัวตรวจของ MPL จะไปเกาะที่ชั้นเมฆ"),
 }
 
 
@@ -8895,7 +8903,8 @@ class Step7Page(ctk.CTkFrame):
         key = self.plot_mode.get().strip()[:1]
         try:
             {"1": self._plot_overlay, "2": self._plot_reldiff, "3": self._plot_ratio,
-             "4": self._plot_depol, "6": self._plot_rti_lines}.get(key, self._plot_summary)()
+             "4": self._plot_depol, "6": self._plot_rti_lines,
+             "7": self._plot_layer_height}.get(key, self._plot_summary)()
         except Exception as e:
             self.ax.clear()
             self.ax.text(0.5, 0.5, f"Plot failed:\n{e}", ha="center", va="center",
@@ -9203,6 +9212,63 @@ class Step7Page(ctk.CTkFrame):
         ax.set_ylim(bottom=0)
         self._range_axis(ax)
         ax.legend(fontsize=8)
+
+    def _plot_layer_height(self):
+        """Mixing-layer top over time: our method on both datasets, plus MPL's own PBL.
+
+        Keeping the three apart is the point — the same method on the two datasets
+        answers "do we measure the same layer?", while the Mini-MPL's own PBL is a
+        different quantity (on a cloudy night its detector sits on the cloud).
+        """
+        ax = self.ax
+        drew = False
+        for i, res in enumerate(self._results):
+            per = res.get("per_profile")
+            if per is None or not len(per) or "layer_ours_m" not in per.columns:
+                continue
+            d = per[per["n_bins"] >= 10] if "n_bins" in per.columns else per
+            if not len(d):
+                continue
+            t = pd.to_datetime(d["Time"])
+            c = _VAL_CASE_COLORS[i % len(_VAL_CASE_COLORS)]
+            lab = res["label"]
+
+            def _gapped(col):
+                """Break the line across a gap in time (no measurement, not a flat layer):
+                a night run leaves 12 h between the morning and evening profiles."""
+                y = pd.to_numeric(d[col], errors="coerce").to_numpy(float) / 1000.0
+                dt = t.diff().dt.total_seconds().to_numpy()
+                return np.where(np.isfinite(dt) & (dt > 2 * 3600), np.nan, y)
+
+            ax.plot(t, _gapped("layer_ours_m"), "o-", color=c, lw=1.4, ms=5,
+                    label=f"{lab} — prototype")
+            ax.plot(t, _gapped("layer_mpl_m"), "o--", color=c, lw=1.2, ms=5,
+                    mfc="none", label=f"{lab} — Mini-MPL, same method")
+            if "mpl_pbl_m" in d.columns and np.isfinite(d["mpl_pbl_m"]).any():
+                ax.plot(t, d["mpl_pbl_m"] / 1000.0, "x", color=theme.TEXT_MUTED, ms=6, lw=1.2,
+                        label=f"{lab} — Mini-MPL own PBL")
+            if "cloud_base_m" in d.columns and np.isfinite(d["cloud_base_m"]).any():
+                ax.plot(t, _gapped("cloud_base_m"), ":", color=c, lw=1.0, alpha=.7,
+                        label=f"{lab} — cloud base")
+            drew = True
+        if not drew:
+            ax.text(0.5, 0.5,
+                    "No layer heights available. "
+                    "Re-run the validation so the per-profile table carries layer_ours_m.",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=10,
+                    color=theme.TEXT_MUTED)
+            ax.set_axis_off()
+            return
+        ax.set_ylabel("Height [km]")
+        ax.set_xlabel("Time")
+        ax.set_ylim(bottom=0)
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Mixing-layer top over time\n"
+                     "same method on both datasets (filled vs open); MPL's own PBL is a different "
+                     "quantity (grey ×)", fontsize=10)
+        for lbl in ax.get_xticklabels():
+            lbl.set_rotation(30); lbl.set_ha("right")
+        ax.legend(fontsize=7, ncol=2)
 
     def _plot_summary(self):
         """Render the cross-case comparison as a table inside the figure."""

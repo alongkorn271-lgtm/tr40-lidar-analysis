@@ -86,6 +86,15 @@ CLOUD_TIME_WINDOW_MIN = 5.0
 CLOUD_BASE_MARGIN_M = 150.0
 # Fewer compared bins than this (= 300 m on the 30 m grid) -> not a valid profile.
 MIN_COMPARE_BINS = 10
+# Layer height. The Mini-MPL's own "pbls" is not the same quantity as ours: on a
+# cloudy night its detector sits on the cloud (2026-09-14: 18 of 24 profiles
+# within 300 m of the cloud base), and comparing our mixing-layer top against it
+# showed a 0.6-1.2 km difference that is definition, not measurement. So the
+# comparison runs OUR method on BOTH datasets, on the MPL grid and with the same
+# smoothing, and reports the Mini-MPL's own value separately: on 2026-09-15 the
+# same-method difference is 210 m while the two definitions differ by 1199 m.
+LAYER_SMOOTH_M = 150.0
+LAYER_MIN_RANGE_M = 300.0
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +432,32 @@ def compare_one(r_grid: np.ndarray, proto: np.ndarray, mpl: np.ndarray,
     }
 
 
+def gradient_layer_top_m(r_m, nrb, rmin_m: float, rmax_m: float,
+                         smooth_m: float = LAYER_SMOOTH_M) -> float:
+    """Range of the strongest fall of the range-corrected signal ("mixing layer top").
+
+    The signal is smoothed over ``smooth_m`` first, so a single noisy bin cannot
+    win; the search is limited to [rmin_m, rmax_m], which the caller sets to the
+    cloud-screened window. NaN when the window holds too little signal.
+    """
+    r = np.asarray(r_m, float)
+    y = np.asarray(nrb, float)
+    ok = np.isfinite(y) & (r >= rmin_m) & (r <= rmax_m) & (y > 0)
+    if int(ok.sum()) < 6:
+        return float("nan")
+    dr = float(np.median(np.diff(r)))
+    if not np.isfinite(dr) or dr <= 0:
+        return float("nan")
+    n = max(1, int(round(smooth_m / dr)))
+    ys = pd.Series(np.where(ok, y, np.nan)).rolling(n, center=True, min_periods=2).mean().to_numpy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        d = np.where(ok, np.gradient(ys, r), np.nan)
+    if not np.isfinite(d).any():
+        return float("nan")
+    return float(r[int(np.nanargmin(d))])
+
+
 def mpl_depol_to_delta(d) -> np.ndarray:
     """Mini-MPL depolarization -> volume linear depolarization ratio (no conversion).
 
@@ -580,6 +615,16 @@ def run_validation(
             mask &= np.isfinite(m_snr) & (m_snr >= snr_min)
 
         res = compare_one(r_grid, p_nrb, m_nrb, mask)
+
+        # Layer height: our method on both datasets, plus the MPL's own value.
+        top_for_layer = min(top_m, float(rmax_m))
+        layer_ours = gradient_layer_top_m(r_grid, p_nrb, LAYER_MIN_RANGE_M, top_for_layer)
+        layer_mpl = gradient_layer_top_m(r_grid, m_nrb, LAYER_MIN_RANGE_M, top_for_layer)
+        mpl_pbl = np.nan
+        if mpl.get("pbl_m"):
+            k = min(mpl["pbl_m"], key=lambda t: _minutes_apart(t, p_ts))
+            if _minutes_apart(k, p_ts) <= match_tolerance_min:
+                mpl_pbl = float(mpl["pbl_m"][k])
         name = pd.Timestamp(p_ts).strftime("%H:%M")
         reldiff_cols[name] = res.pop("reldiff_profile")
         ratio_cols[name] = res.pop("ratio_profile")
@@ -598,6 +643,10 @@ def run_validation(
                      "dt (min)": round(dt_min, 1),
                      "cloud_base_m": cloud_m,
                      "compare_top_m": top_m,
+                     "layer_ours_m": layer_ours,
+                     "layer_mpl_m": layer_mpl,
+                     "layer_diff_m": layer_ours - layer_mpl,
+                     "mpl_pbl_m": mpl_pbl,
                      "shots": qrow.get("shots", np.nan),
                      "bg_par_mhz": qrow.get("bg_mhz", np.nan),
                      "glue_r2": qrow.get("glue_r2", np.nan),
@@ -689,6 +738,12 @@ def run_validation(
         "Calibration k (median)": _med("k_calibration"),
         "Depol rel diff % (median)": (float(np.nanmedian(depol_df["reldiff_median_pct"]))
                                       if len(depol_df) else float("nan")),
+        # Same method on both datasets vs the Mini-MPL's own PBL definition.
+        "Layer ours (median m)": _med("layer_ours_m"),
+        "Layer MPL same method (median m)": _med("layer_mpl_m"),
+        "Layer |ours - MPL| (median m)": (float(np.nanmedian(np.abs(valid["layer_diff_m"])))
+                                          if len(valid) else float("nan")),
+        "MPL own PBL (median m)": _med("mpl_pbl_m"),
     }])
 
     log(f"[{label}] valid {len(valid)}/{len(per_profile)} · "
