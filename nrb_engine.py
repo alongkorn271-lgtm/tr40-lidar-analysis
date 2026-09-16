@@ -33,6 +33,15 @@ def cosine_taper_weight(r: np.ndarray, r1: float, r2: float) -> np.ndarray:
 # corrected photon and glued curve coincide above the max toggle rate). Daytime
 # Mini-MPL agreement improved with it (2026-09-14 day CV 41 -> 20 %).
 DEFAULT_DEAD_TIME_NS = 4.8
+# Per channel, from one criterion that does not need the gain: the glue gain must
+# not depend on rate. Scanning tau and scoring the spread of G across the bands
+# 10-20 / 20-40 / 40-80 / 80-130 MHz (2026-09-16, nights of 08/09/14/15 Sep) gives
+# parallel 4.6-4.7 ns and perpendicular 5.0-5.1 ns, the same on every night and at
+# both bin widths; the spread falls from 3.7-5.5 % at a shared 4.8 ns to 1.0-2.3 %.
+# Two PMTs of the same type differ in pulse height and width, and the observed
+# dead time is that combination against the discriminator (PM-HV manual 5.6-5.7).
+DEAD_TIME_NS_PAR = 4.7
+DEAD_TIME_NS_PERP = 5.0
 
 # Night toggle window = where analog AND photon are both linear, so the glue gain
 # G = (photon_dt - bg)/(analog - bg) is flat. Measured 2026-09-15 by rate band
@@ -1078,8 +1087,12 @@ def compute_nrb_reference_glue(
     # poor — the analog channel degraded by daytime clipping / PMT protection — do
     # NOT trust the glue; fall back to photon-only for this profile. Verified on
     # 04-21 dawn: BG≤40 gives r²≥0.88 (glue kept), BG≥80 gives r²≤0.74 (rejected).
+    # A gain supplied by the caller is the instrument's own constant, not a fit to
+    # this profile, so the r2 of that forced line says nothing about whether the
+    # analog is usable -- the caller decided that (daytime: from the PMT current).
     guard_failed = (
         gluing_mode_l == "auto_bgsub_guarded"
+        and fit_mode != "night_gain_override"
         and not (np.isfinite(fit_quality_r2) and fit_quality_r2 >= float(day_glue_min_r2)
                  and np.isfinite(slope) and slope > 0.0)
     )

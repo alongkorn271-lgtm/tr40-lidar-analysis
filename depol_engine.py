@@ -493,6 +493,8 @@ def build_depol_for_pair(
     glue_gain_cross: Optional[float] = None,
     photon_only_co: bool = False,
     photon_only_cross: bool = False,
+    dead_time_ns_co: Optional[float] = None,
+    dead_time_ns_cross: Optional[float] = None,
     **nrb_kwargs,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """
@@ -524,12 +526,20 @@ def build_depol_for_pair(
     # default to "parallel". A 2-PMT file passes the SAME path for both with
     # co_channel="parallel", cross_channel="perpendicular".
     nrb_kwargs.pop("channel", None)
+    # The dead time is a property of each detection chain, not of the file: the
+    # two PMTs differ (see DEAD_TIME_* in nrb_engine), so each channel may carry
+    # its own. None keeps the shared dead_time_ns.
+    co_kwargs, cr_kwargs = dict(nrb_kwargs), dict(nrb_kwargs)
+    if dead_time_ns_co is not None and np.isfinite(dead_time_ns_co):
+        co_kwargs["dead_time_ns"] = float(dead_time_ns_co)
+    if dead_time_ns_cross is not None and np.isfinite(dead_time_ns_cross):
+        cr_kwargs["dead_time_ns"] = float(dead_time_ns_cross)
     co_df, co_meta = build_single_profile(
         Path(co_path), afterpulse_A_R=afterpulse_co, channel=co_channel,
-        glue_gain_override=glue_gain_co, force_photon_only=photon_only_co, **nrb_kwargs)
+        glue_gain_override=glue_gain_co, force_photon_only=photon_only_co, **co_kwargs)
     cr_df, cr_meta = build_single_profile(
         Path(cross_path), afterpulse_A_R=afterpulse_cross, channel=cross_channel,
-        glue_gain_override=glue_gain_cross, force_photon_only=photon_only_cross, **nrb_kwargs)
+        glue_gain_override=glue_gain_cross, force_photon_only=photon_only_cross, **cr_kwargs)
 
     r = co_df["range_m"].to_numpy(float)
     r_cr = cr_df["range_m"].to_numpy(float)
@@ -779,6 +789,9 @@ def build_daily_depol_from_folders(
     pmt_max_dc_mv: float = PMT_MAX_DC_MV,
     dark_offset_par_mv: Optional[float] = None,
     dark_offset_perp_mv: Optional[float] = None,
+    dead_time_ns_par: Optional[float] = None,
+    dead_time_ns_perp: Optional[float] = None,
+    day_glue_from_night_gain: bool = False,
     **nrb_kwargs,
 ) -> Dict[str, pd.DataFrame]:
     """
@@ -885,6 +898,9 @@ def build_daily_depol_from_folders(
     def _process(ts, co_path, cr_path, gain_co=None, gain_cross=None, po_co=False, po_cross=False):
         if single is not None:
             kw = dict(nrb_kwargs)
+            dt_one = dead_time_ns_par if single == "par" else dead_time_ns_perp
+            if dt_one is not None and np.isfinite(dt_one):
+                kw["dead_time_ns"] = float(dt_one)
             if (po_co if single == "par" else po_cross):
                 kw["force_photon_only"] = True
             return build_single_channel_for_file(
@@ -900,6 +916,7 @@ def build_daily_depol_from_folders(
             cross_channel="perpendicular" if dual_channel_file else "parallel",
             glue_gain_co=gain_co, glue_gain_cross=gain_cross,
             photon_only_co=po_co, photon_only_cross=po_cross,
+            dead_time_ns_co=dead_time_ns_par, dead_time_ns_cross=dead_time_ns_perp,
             **nrb_kwargs,
         )
 
@@ -1035,6 +1052,53 @@ def build_daily_depol_from_folders(
         if logger:
             logger(f"PMT over-current: parallel {n_over['par']}, perpendicular {n_over['perp']} "
                    f"of {sum(1 for x in processed if x[6] is None)} profile(s)")
+
+    # Pass 5 (optional): daytime glue from the night's gain. Licel 9.7.5 says that
+    # once the background is above the min toggle there is no need to fit at all --
+    # use the scaled analog, the transfer coefficients being constant at the same
+    # HV. The daytime regression is unreliable anyway (slopes 0-92 on 2026-09-15),
+    # so where the PMT current says the analog is still good, the night's gain is
+    # the better scale. Off by default.
+    if day_glue_from_night_gain and single is None:
+        gains = {}
+        for pref in ("par", "perp"):
+            g = [m.get(f"{pref}_slope") for (_, _, _, _, d, m, err) in processed
+                 if err is None and m.get(f"{pref}_glue_fit_mode") == "robust_median_gain"
+                 and m.get(f"{pref}_day_night_glue_pick", "night_glue") != "day_glue_bgsub"
+                 and np.isfinite(m.get(f"{pref}_fit_quality_r2", np.nan))
+                 and m.get(f"{pref}_fit_quality_r2") >= GLUE_REF_MIN_R2]
+            fb = fallback_glue_gain_par if pref == "par" else fallback_glue_gain_perp
+            gains[pref] = float(np.median(g)) if len(g) >= 2 else (
+                float(fb) if fb is not None and np.isfinite(fb) and fb > 0 else np.nan)
+        n_day = 0
+        for i, (ts, co_path, cr_path, key, df, meta, err) in enumerate(processed):
+            if err is not None:
+                continue
+            force = {}
+            for pref in ("par", "perp"):
+                if meta.get(f"{pref}_day_night_glue_pick") != "day_glue_bgsub":
+                    continue                      # night profiles keep their own fit
+                if meta.get(f"{pref}_pmt_overcurrent") == 1.0:
+                    continue                      # analog not meaningful at that current
+                if np.isfinite(gains[pref]):
+                    force[pref] = gains[pref]
+            if not force:
+                continue
+            try:
+                df2, meta2 = _process(ts, co_path, cr_path,
+                                      gain_co=force.get("par"), gain_cross=force.get("perp"))
+                for p_ in force:
+                    meta2[f"{p_}_glue_fit_mode"] = "day_night_gain"
+                    for k in ("solar_dc_mv", "pmt_overcurrent"):
+                        meta2[f"{p_}_{k}"] = meta.get(f"{p_}_{k}")
+                processed[i] = (ts, co_path, cr_path, key, df2, meta2, None)
+                n_day += 1
+            except Exception as e:
+                if logger:
+                    logger(f"   {key}: daytime night-gain rerun failed ({e}); keeping the fit")
+        if logger:
+            logger(f"daytime glue from the night's gain: {n_day} profile(s) "
+                   f"(parallel {gains['par']:.2f}, perpendicular {gains['perp']:.2f} MHz/mV)")
 
     # Analog peak vs input range (PMT manual §5.2: keep it below half the range).
     if logger:

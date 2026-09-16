@@ -6836,6 +6836,9 @@ class Step6Page(ctk.CTkFrame):
         #    All of these are forwarded to build_single_profile via nrb_kwargs.
         self.bin_spacing_m        = tk.DoubleVar(value=3.75)
         self.dead_time_ns         = tk.DoubleVar(value=4.8)   # measured, see nrb_engine.DEFAULT_DEAD_TIME_NS
+        # Per-channel dead time (blank = use the shared value above).
+        self.dead_time_par        = tk.StringVar(value="4.7")
+        self.dead_time_perp       = tk.StringVar(value="5.0")
         self.bg_mode              = tk.StringVar(value="pretrigger")
         self.first_signal_bin     = tk.IntVar(value=1025)
         self.first_signal_range_m = tk.DoubleVar(value=3.75)
@@ -6877,6 +6880,9 @@ class Step6Page(ctk.CTkFrame):
         # PMT anode current (Licel PMT manual §5.1): pretrigger analog − dark offset
         # must stay below 5 mV (100 µA); over it the analog is dropped (photon only).
         self.pmt_check = tk.BooleanVar(value=True)
+        # Daytime: scale the analog with the night's gain instead of a daytime fit
+        # (Licel 9.7.5). Only where the PMT current says the analog is still good.
+        self.day_night_gain = tk.BooleanVar(value=True)
         self.pmt_max_dc_mv = tk.StringVar(value="5.0")
         self.dark_offset_par = tk.StringVar(value="")    # blank = night pretrigger median
         self.dark_offset_perp = tk.StringVar(value="")
@@ -7217,6 +7223,19 @@ class Step6Page(ctk.CTkFrame):
            row=0, column=0, sticky="w")
         cb(f, "Auto day/night glue: day → photon only, night → glue (overrides Skip glue)",
            self.glue_auto_daynight, row=1, column=0, sticky="w", pady=(6, 0))
+        dt = ctk.CTkFrame(f, fg_color="transparent")
+        dt.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(dt, text="Dead time per channel  ∥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(dt, textvariable=self.dead_time_par, width=55, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(dt, text="⊥:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(10, 6))
+        ctk.CTkEntry(dt, textvariable=self.dead_time_perp, width=55, **theme.input_style()).pack(side="left")
+        ctk.CTkLabel(dt, text="ns (blank = use dead_time_ns for both). Measured 2026-09-16: the two PMTs "
+                             "differ, and each channel's own τ keeps its glue gain flat across rate "
+                             "(spread 3.7–5.5 % → 1.0–2.3 %).",
+                     font=theme.F_TINY, text_color=theme.TEXT_MUTED, wraplength=520,
+                     justify="left").pack(side="left", padx=(8, 0))
         note("Toggle window = where analog and photon are BOTH linear, i.e. the glue gain "
              "photon/analog is flat. Measured 2026-09-15 (τ = 4.8 ns): flat within ±1 % from "
              "10 to 40 MHz. Below ~10 MHz the analog baseline error bends the gain; above "
@@ -7327,6 +7346,20 @@ class Step6Page(ctk.CTkFrame):
         cb(f, "PMT current check: drop the analog (photon only) when the pretrigger level exceeds "
               "the dark offset by more than the limit",
            self.pmt_check, row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        cb(f, "Daytime: scale the analog with the night's glue gain instead of a daytime fit "
+              "(only where the PMT current is within the limit)",
+           self.day_night_gain, row=14, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(
+            f,
+            text="Licel §9.7.5: once the background is above the min toggle there is nothing to fit — "
+                 "use the scaled analog, the gain being constant at the same HV. The daytime fit gave "
+                 "slopes of 0–92 MHz/mV on 2026-09-15, so most profiles fell back to photon only and "
+                 "lost the near field to pile-up. Measured: above 1 km the two are the same (CV 7.5 vs "
+                 "7.6 and 5.5 vs 4.8), while the profile now starts at ~50 m instead of ~0.9–1.4 km, "
+                 "and that recovered near field agrees with the Mini-MPL to CV 16–18 %.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED,
+            justify="left", wraplength=760,
+        ).grid(row=15, column=0, columnspan=3, sticky="w", pady=(2, 0))
         pm = ctk.CTkFrame(f, fg_color="transparent")
         pm.grid(row=12, column=0, columnspan=3, sticky="w", pady=(2, 0))
         ctk.CTkLabel(pm, text="Limit (mV):", font=theme.F_SMALL,
@@ -7750,6 +7783,8 @@ class Step6Page(ctk.CTkFrame):
             pmt_lim = float(self.pmt_max_dc_mv.get())
             off_par = float(self.dark_offset_par.get()) if self.dark_offset_par.get().strip() else None
             off_perp = float(self.dark_offset_perp.get()) if self.dark_offset_perp.get().strip() else None
+            dt_par = float(self.dead_time_par.get()) if self.dead_time_par.get().strip() else None
+            dt_perp = float(self.dead_time_perp.get()) if self.dead_time_perp.get().strip() else None
         except Exception:
             messagebox.showerror("Error", "Invalid numeric parameter.")
             return
@@ -7874,6 +7909,8 @@ class Step6Page(ctk.CTkFrame):
                     pmt_current_check=bool(self.pmt_check.get()),
                     pmt_max_dc_mv=pmt_lim,
                     dark_offset_par_mv=off_par, dark_offset_perp_mv=off_perp,
+                    dead_time_ns_par=dt_par, dead_time_ns_perp=dt_perp,
+                    day_glue_from_night_gain=bool(self.day_night_gain.get()),
                     single_channel=single,
                     dual_channel_file=dual,
                     # Full raw-processing parameters (forwarded to build_single_profile
