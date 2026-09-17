@@ -793,6 +793,7 @@ def build_daily_depol_from_folders(
     dead_time_ns_par: Optional[float] = DEAD_TIME_NS_PAR,
     dead_time_ns_perp: Optional[float] = DEAD_TIME_NS_PERP,
     day_glue_from_night_gain: bool = True,
+    raw_qc: Optional[pd.DataFrame] = None,
     **nrb_kwargs,
 ) -> Dict[str, pd.DataFrame]:
     """
@@ -1269,6 +1270,14 @@ def build_daily_depol_from_folders(
     df_snr_co = _frame(snr_co_cols)
     df_snr_cr = _frame(snr_cr_cols)
     df_qc = pd.DataFrame(qc_rows)
+    # Raw-data quality verdicts (raw_quality_check.profile_flags), joined by file key,
+    # so the workbook records which acquisition criteria each profile failed.
+    if raw_qc is not None and len(raw_qc) and len(df_qc) and "key" in df_qc:
+        flags = raw_qc.drop_duplicates("key").set_index("key")
+        df_qc = df_qc.join(flags, on="key")
+        n_match = int(df_qc["rawqc_n_fail"].notna().sum()) if "rawqc_n_fail" in df_qc else 0
+        if logger:
+            logger(f"Raw QC verdicts attached to {n_match}/{len(df_qc)} QC row(s)")
 
     # Per-channel raw/processed SIGNAL sheets (range x time) so Step 6 can draw
     # the prototype signal figures (Analog / Photon / Glue) from the workbook.

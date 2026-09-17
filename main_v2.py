@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 import pandas as pd
@@ -157,6 +157,14 @@ try:
 except Exception:
     _HAS_PBL_DENOISE = False
 
+# Raw-data quality check (Raw QC step — before any processing)
+try:
+    import raw_quality_check as _rq
+    import raw_quality_sheet as _rqs
+    _HAS_RAWQC = True
+except Exception:
+    _HAS_RAWQC = False
+
 # Matplotlib (Step 2 + Step 4 plots)
 import matplotlib
 matplotlib.use("TkAgg")
@@ -179,6 +187,10 @@ class AppState:
         self.step2_output: Optional[str] = None
         self.step3_output: Optional[str] = None
         self.depol_output: Optional[str] = None   # Step 6 (Depolarization) workbook
+        # Raw QC step: check sheet path, per-file verdict table, and the folder it describes
+        self.rawqc_output: Optional[str] = None
+        self.rawqc_df: Optional[pd.DataFrame] = None
+        self.rawqc_folder: Optional[str] = None
         self._cbs: List[Callable] = []
 
     def register_cb(self, fn: Callable):
@@ -205,6 +217,10 @@ class AppState:
 
     def set_depol(self, p: str):
         self.depol_output = p
+        self._notify()
+
+    def set_rawqc(self, p: str, df: pd.DataFrame, folder: str):
+        self.rawqc_output, self.rawqc_df, self.rawqc_folder = p, df, folder
         self._notify()
 
 
@@ -405,12 +421,14 @@ NAV_ITEMS = [
     # Fernald), so it is redundant. The Step2Page class + page id "step2" are kept
     # (unreachable) to avoid touching internal references; only the sidebar order
     # and the displayed "Step N" numbers changed.
+    # Raw QC checks the acquisition itself before anything is processed.
     ("step1", "MPL rmin-rmax",       "🌅"),  # 1
-    ("step6", "Depolarization",      "🧭"),  # 2
-    ("step3", "ALT",                 "📊"),  # 3
-    ("step5", "Fernald",             "🔬"),  # 4
-    ("step4", "Display / Visualize", "🌈"),  # 5
-    ("step7", "Validation",          "✅"),  # 6
+    ("rawqc", "Raw QC",              "🩺"),  # 2
+    ("step6", "Depolarization",      "🧭"),  # 3
+    ("step3", "ALT",                 "📊"),  # 4
+    ("step5", "Fernald",             "🔬"),  # 5
+    ("step4", "Display / Visualize", "🌈"),  # 6
+    ("step7", "Validation",          "✅"),  # 7
 ]
 
 
@@ -2455,7 +2473,7 @@ class Step3Page(ctk.CTkFrame):
 
         header = PageHeader(
             self,
-            title="Step 3 · ALT Calculator",
+            title="Step 4 · ALT Calculator",
             subtitle="NRB profile → Aerosol Layer Top, with optional MPL-guided rmin/rmax",
             badge=("FFT + HWCT", "navy"),
         )
@@ -3256,7 +3274,7 @@ class Step4Page(ctk.CTkFrame):
 
         header = PageHeader(
             self,
-            title="Step 5 · Display / Visualize",
+            title="Step 6 · Display / Visualize",
             subtitle="Range-Time Intensity · Prototype vs Mini MPL · ALT overlay · drag the divider to resize panels",
             badge=("Final stage", "navy"),
         )
@@ -5985,7 +6003,7 @@ class Step5Page(ctk.CTkFrame):
 
         header = PageHeader(
             self,
-            title="Step 4 · Fernald / Klett Inversion",
+            title="Step 5 · Fernald / Klett Inversion",
             subtitle="Retrieve aerosol backscatter, extinction and AOD from the NRB profile",
             badge=("v1.0", "navy"),
         )
@@ -6897,6 +6915,9 @@ class Step6Page(ctk.CTkFrame):
         # instead of a least-squares line that cloud and noise-level bins drag
         # down. Default ON; untick for the legacy fit.
         self.robust_glue = tk.BooleanVar(value=True)
+        # Attach the Raw QC per-file verdicts to the QC sheet (reuses the Raw QC step's
+        # result for the same folder, otherwise measures the raw files here).
+        self.attach_rawqc = tk.BooleanVar(value=True)
         # Corrections (so per-channel NRB is fully comparable to MPL / Step 2)
         self.energy_mj    = tk.DoubleVar(value=25.0)
         # Overlap ON by default (analytical NARIT geometry), matching the NRB page.
@@ -6936,6 +6957,17 @@ class Step6Page(ctk.CTkFrame):
 
         self._build_ui()
         self._update_delta_mol_ui()
+        self.app_state.register_cb(self._on_rawqc_state)
+
+    def _on_rawqc_state(self):
+        """Raw QC just ran on a folder: offer it as the input if nothing is chosen yet."""
+        folder = getattr(self.app_state, "rawqc_folder", None)
+        if folder and not self.co_folder.get().strip():
+            self.co_folder.set(folder)
+            self.channel_mode.set("2-PMT file (par+perp)")
+            self._on_channel_mode_change()
+            if not self.out_path.get().strip():
+                self.out_path.set(str(Path(folder) / "Depol-output.xlsx"))
 
     # ── Backend missing fallback ───────────────────────────────────────────
     def _build_missing_view(self):
@@ -6957,7 +6989,7 @@ class Step6Page(ctk.CTkFrame):
 
         header = PageHeader(
             self,
-            title="Step 2 · Depolarization (parallel / perpendicular)",
+            title="Step 3 · Depolarization (parallel / perpendicular)",
             subtitle="Volume depolarization ratio δ + aerosol typing from paired parallel/perpendicular .dat files",
             badge=("v1.0", "navy"),
         )
@@ -7077,6 +7109,19 @@ class Step6Page(ctk.CTkFrame):
             wraplength=480, justify="left",
         ).grid(row=10, column=0, sticky="w", pady=(4, 0))
         self._on_channel_mode_change()   # set initial enable/label state
+        ctk.CTkCheckBox(
+            body, text="Attach Raw QC verdicts to the QC sheet", variable=self.attach_rawqc,
+            font=theme.F_SMALL,
+        ).grid(row=11, column=0, sticky="w", pady=(10, 0))
+        ctk.CTkLabel(
+            body,
+            text="Adds rawqc_* columns (PASS/WARN/FAIL per criterion + the failed items) to "
+                 "QC_calibration, so Validation can drop profiles whose raw data failed. Uses the "
+                 "Raw QC step's result when it was run on this folder; otherwise measures the raw "
+                 "files first (~1 min per day).",
+            font=(theme.FONT_FAMILY, 10), text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=480, justify="left",
+        ).grid(row=12, column=0, sticky="w", pady=(2, 0))
         return card
 
     def _on_channel_mode_change(self, *_):
@@ -7826,6 +7871,7 @@ class Step6Page(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return
 
+        attach_rawqc = bool(self.attach_rawqc.get()) and _HAS_RAWQC
         # Raw-binary photon-StErr policy (tk var read on the UI thread).
         poisson_mode = "auto" if bool(self.poisson_stderr.get()) else "off"
 
@@ -7891,8 +7937,31 @@ class Step6Page(ctk.CTkFrame):
                 except Exception as ce:
                     self._safe(self._log, f"[WARN] correction setup: {ce}")
 
+                raw_qc_flags = None
+                if attach_rawqc:
+                    try:
+                        qfolder = Path(co) if Path(co).is_dir() else Path(co).parent
+                        st = self.app_state
+                        if (st.rawqc_df is not None and st.rawqc_folder
+                                and Path(st.rawqc_folder).resolve() == qfolder.resolve()):
+                            qdf = st.rawqc_df
+                            self._safe_log("Raw QC: using the Raw QC step's result for this folder")
+                        else:
+                            self._safe_log("Raw QC: measuring the raw files (no Raw QC result for this folder)…")
+                            qdf = _rq.check_folder(qfolder)
+                        if qdf is not None and len(qdf):
+                            raw_qc_flags = _rq.profile_flags(qdf)
+                            sc = _rq.score(_rq.summarize(qdf))
+                            self._safe_log(f"Raw QC: {sc['passed']} / {sc['total']} criteria passed "
+                                           f"({sc['partial']} partial, {sc['failed']} failed)")
+                        else:
+                            self._safe_log("[WARN] Raw QC: no Licel raw files found — not attached")
+                    except Exception as qe:
+                        self._safe_log(f"[WARN] Raw QC not attached: {qe}")
+
                 res = _depol_run(
                     Path(co), Path(cross), Path(out),
+                    raw_qc=raw_qc_flags,
                     delta_mol=dmol, cal_rmin_m=cmin, cal_rmax_m=cmax,
                     pattern=pat, pretrigger_bins=pbins,
                     date_str=date_str_val,
@@ -8436,6 +8505,8 @@ class Step7Page(ctk.CTkFrame):
         self.time_filter = tk.StringVar(value="night")
         self.match_tol_min = tk.DoubleVar(value=5.0)
         self.cloud_screen = tk.BooleanVar(value=True)   # compare below MPL cloud base only
+        # Drop profiles whose raw data FAILED these Raw QC items (blank = keep all)
+        self.rawqc_exclude = tk.StringVar(value="")
         # Profile filters: drop aborted short files; day/night from the signal.
         self.min_shots = tk.DoubleVar(value=1500.0)
         self.day_bg_mhz = tk.DoubleVar(value=10.0)
@@ -8470,7 +8541,7 @@ class Step7Page(ctk.CTkFrame):
 
         PageHeader(
             self,
-            title="Step 6 · Validation vs Mini-MPL",
+            title="Step 7 · Validation vs Mini-MPL",
             subtitle="Case 01 vs Case 02 · EARLINET-style relative difference, ratio "
                      "constancy and regression · boundary layer only, real range",
             badge=("intercomparison", "navy"),
@@ -8652,6 +8723,22 @@ class Step7Page(ctk.CTkFrame):
             font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
             wraplength=520, justify="left",
         ).grid(row=5, column=0, sticky="w", pady=(2, 0))
+        rq_row = ctk.CTkFrame(body, fg_color="transparent")
+        rq_row.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        ctk.CTkLabel(rq_row, text="Drop profiles failing Raw QC:", font=theme.F_SMALL,
+                     text_color=theme.TEXT_SECONDARY).pack(side="left")
+        ctk.CTkEntry(rq_row, textvariable=self.rawqc_exclude, width=180,
+                     **theme.input_style()).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            body,
+            text="Raw QC verdict columns, comma separated (p = parallel, s = perpendicular): A1 A2 "
+                 "B1p B1s B3p B3s C1p C1s C2p C2s D1p D1s D2p D2s E1 E2 F1 G1, or NRB / DELTA = the profiles Raw QC judged unusable "
+                 "for that product - e.g. 'DELTA' or 'E2, C2p'. "
+                 "A profile is dropped when any listed item is FAIL. Needs a Step 3 workbook made "
+                 "with 'Attach Raw QC verdicts'. Blank = keep all.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=7, column=0, sticky="w", pady=(2, 0))
         return card
 
     def _build_run_card(self, parent) -> "Card":
@@ -8875,6 +8962,7 @@ class Step7Page(ctk.CTkFrame):
                 day_bg_threshold_mhz=float(self.day_bg_mhz.get()),
                 day_glue_r2_min=float(self.day_glue_r2.get()),
                 cloud_screen=bool(self.cloud_screen.get()),
+                rawqc_exclude=[x for x in self.rawqc_exclude.get().replace(",", " ").split() if x],
             )
         except Exception as e:
             messagebox.showerror("Invalid parameter", str(e)); return
@@ -9402,6 +9490,539 @@ class Step7Page(ctk.CTkFrame):
         self._log(f"Saved figure -> {p}")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Raw QC Page  –  raw-data quality check before any processing
+# ═════════════════════════════════════════════════════════════════════════════
+class RawQCPage(ctk.CTkFrame):
+    """Measure every raw Licel file against the acquisition criteria (raw_quality_check)
+    before Step 3 processes it: analog clipping, PMT current, photon background, glue
+    window, SNR, ratio stability. Saves a DCT-04-style check sheet and hands the per-file
+    verdicts to Depolarization (attached to its QC sheet) and Validation (filter)."""
+
+    # plan presets from LiDAR-DCT-04 (shots, bin m, HV V, altitude km)
+    PRESETS = {
+        "Case 01 · Baseline · 3.75 m · 2400 shot": (2400, 3.75, 750, 15.0),
+        "Case 02 · MPL · 30 m · 6000 shot": (6000, 30.0, 750, 30.0),
+        "Case 03 · Noise · 3.75 m · 2400 shot": (2400, 3.75, 750, 15.0),
+        "Custom": None,
+    }
+    VERDICT_COLORS = {"PASS": "#1E7A46", "WARN": "#E0900E", "FAIL": "#C0392B", "NA": "#D9D9D9"}
+    STATUS_BG = {"ผ่าน": "#D7F4E8", "บางส่วน": "#FFF1CC", "ไม่ผ่าน": "#FFE0E6", "NA": "#EFEFEF"}
+    PAR_COLOR, PERP_COLOR = "#1F5FA6", "#B5541F"
+    VIEWS = ["Usable files (by profile)", "Summary by criterion", "Files × criteria", "Time series"]
+    USE_BG = {"USABLE": "#D7F4E8", "LIMITED": "#FFF1CC", "UNUSABLE": "#FFE0E6"}
+
+    def __init__(self, master, app_state: AppState):
+        super().__init__(master, fg_color="transparent")
+        self.app_state = app_state
+        self.folder = tk.StringVar()
+        self.case_name = tk.StringVar(value="C01")
+        self.preset = tk.StringVar(value=next(iter(self.PRESETS)))
+        self.plan_shots = tk.StringVar(value="2400")
+        self.plan_bin = tk.StringVar(value="3.75")
+        self.plan_hv = tk.StringVar(value="750")
+        self.plan_alt = tk.StringVar(value="15")
+        self.out_path = tk.StringVar()
+        self.view = tk.StringVar(value=self.VIEWS[0])
+        self.progress = tk.DoubleVar(value=0.0)
+        self._df: Optional[pd.DataFrame] = None
+        self._summary: Optional[pd.DataFrame] = None
+
+        if not _HAS_RAWQC:
+            self.grid_columnconfigure(0, weight=1)
+            card = Card(self, title="Backend missing", icon="⚠️")
+            card.grid(row=0, column=0, sticky="nsew")
+            ctk.CTkLabel(card.body, text="raw_quality_check.py / raw_quality_sheet.py were not found "
+                                         "alongside this script.", font=theme.F_BODY,
+                         text_color=theme.TEXT_SECONDARY).pack(pady=20)
+            return
+        self._build_ui()
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        PageHeader(self, title="Step 2 · Raw QC",
+                   subtitle="Check the raw Licel files against the signal-quality criteria "
+                            "before processing (LiDAR-DCT-04-QC)",
+                   badge=("before processing", "orange")).grid(row=0, column=0, sticky="ew", pady=(0, 16))
+
+        paned = tk.PanedWindow(self, orient="horizontal", bg=theme.APP_BG, sashrelief="flat",
+                               sashwidth=8, sashpad=0, bd=0, showhandle=False)
+        paned.grid(row=1, column=0, sticky="nsew")
+        left_pane = tk.Frame(paned, bg=theme.APP_BG, bd=0, highlightthickness=0)
+        left_pane.grid_columnconfigure(0, weight=1); left_pane.grid_rowconfigure(0, weight=1)
+        paned.add(left_pane, minsize=360, width=470, stretch="always")
+        left = ctk.CTkScrollableFrame(left_pane, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_columnconfigure(0, weight=1)
+        self._build_io_card(left).grid(row=0, column=0, sticky="ew", pady=(0, 12), padx=(0, 10))
+        self._build_run_card(left).grid(row=1, column=0, sticky="ew", pady=(0, 12), padx=(0, 10))
+        self.console = ConsoleLog(left, title="Console Log")
+        self.console.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
+        self.console.configure(height=260)
+
+        right_pane = tk.Frame(paned, bg=theme.APP_BG, bd=0, highlightthickness=0)
+        right_pane.grid_columnconfigure(0, weight=1); right_pane.grid_rowconfigure(0, weight=1)
+        paned.add(right_pane, minsize=420, stretch="always")
+        self._build_result_card(right_pane).grid(row=0, column=0, sticky="nsew")
+
+    def _label(self, parent, text, row, pady=(0, 0)):
+        ctk.CTkLabel(parent, text=text, font=theme.F_SMALL, text_color=theme.TEXT_SECONDARY,
+                     anchor="w").grid(row=row, column=0, sticky="w", pady=pady)
+
+    def _note(self, parent, text, row, pady=(4, 0)):
+        ctk.CTkLabel(parent, text=text, font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+                     justify="left", wraplength=420).grid(row=row, column=0, sticky="w", pady=pady)
+
+    def _build_io_card(self, parent) -> "Card":
+        card = Card(parent, title="Raw data & plan", icon="🩺")
+        body = card.body
+        self._label(body, "Raw folder (Licel binary, both PMTs in each file)", 0)
+        r1 = ctk.CTkFrame(body, fg_color="transparent"); r1.grid(row=1, column=0, sticky="ew", pady=(2, 8))
+        r1.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(r1, textvariable=self.folder, **theme.input_style()).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(r1, text="Folder…", width=80, command=self._pick_folder,
+                      **theme.secondary_button_style(font=theme.F_SMALL)).grid(row=0, column=1)
+
+        self._label(body, "Plan (DCT-04 case)", 2)
+        ctk.CTkOptionMenu(
+            body, variable=self.preset, values=list(self.PRESETS), command=self._apply_preset,
+            fg_color=theme.CARD_BG, button_color=theme.CARD_BG, button_hover_color=theme.CREAM_SOFT,
+            text_color=theme.TEXT_PRIMARY, dropdown_fg_color=theme.CARD_BG,
+            dropdown_text_color=theme.TEXT_PRIMARY, dropdown_hover_color=theme.CREAM,
+            corner_radius=theme.RADIUS_INPUT, height=30, font=theme.F_SMALL, width=300,
+        ).grid(row=3, column=0, sticky="w", pady=(2, 8))
+        grid = ctk.CTkFrame(body, fg_color="transparent"); grid.grid(row=4, column=0, sticky="ew")
+        for j, (lab, var) in enumerate([("Case name", self.case_name), ("Shots", self.plan_shots),
+                                        ("Bin (m)", self.plan_bin), ("HV (V)", self.plan_hv),
+                                        ("Altitude (km)", self.plan_alt)]):
+            grid.grid_columnconfigure(j, weight=1)
+            FieldRow(grid, lab, var, width=70).grid(row=0, column=j, sticky="ew", padx=(0, 6))
+        self._note(body, "The header of every file is compared with this plan (criterion A2); "
+                         "A1 needs ≥ 95 % of the planned shots.", 5)
+
+        self._label(body, "Check sheet (.xlsx) — blank = RawQC-<date>.xlsx in the raw folder", 6, pady=(10, 0))
+        r2 = ctk.CTkFrame(body, fg_color="transparent"); r2.grid(row=7, column=0, sticky="ew", pady=(2, 0))
+        r2.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(r2, textvariable=self.out_path, **theme.input_style()).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(r2, text="Save As…", width=90, command=self._pick_output,
+                      **theme.secondary_button_style(font=theme.F_SMALL)).grid(row=0, column=1)
+        self._note(body, "Criteria, limits, reasons and references are on the sheet 'เกณฑ์ (Criteria)'. "
+                         "Night = 19:00–05:30; SNR per 30 m; files under 1500 shots only count for A1. "
+                         "Nothing is removed here — Step 3 attaches the verdicts to its QC sheet and "
+                         "Validation can drop profiles that FAIL chosen criteria.", 8, pady=(8, 0))
+        return card
+
+    def _build_run_card(self, parent) -> "Card":
+        card = Card(parent)
+        body = card.body
+        body.grid_columnconfigure(1, weight=1)
+        self.run_btn = ctk.CTkButton(body, text="▶  Run Raw QC", command=self.run,
+                                     **theme.primary_button_style(width=200))
+        self.run_btn.grid(row=0, column=0, sticky="w")
+        self.pb = ctk.CTkProgressBar(body, variable=self.progress, progress_color=theme.ORANGE,
+                                     fg_color=theme.LIGHT_GRAY, height=8, corner_radius=4)
+        self.pb.set(0); self.pb.configure(mode="determinate")
+        self.pb.grid(row=0, column=1, sticky="ew", padx=(16, 0))
+        self.status = StatusBar(body)
+        self.status.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ctk.CTkButton(body, text="Open check sheet", command=self._open_sheet,
+                      **theme.ghost_button_style(width=150, height=30)).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        return card
+
+    def _build_result_card(self, parent) -> "Card":
+        card = Card(parent, title="Raw data quality", icon="📋")
+        body = card.body
+        body.grid_rowconfigure(3, weight=1)
+
+        tiles = ctk.CTkFrame(body, fg_color="transparent")
+        tiles.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self._tiles = {}
+        for j, (key, title, tone) in enumerate([("passed", "Passed", theme.GREEN_SOFT),
+                                                ("partial", "Partial", "#FFF1CC"),
+                                                ("failed", "Failed", theme.RED_SOFT),
+                                                ("files", "Files (night / day)", theme.NAVY_SOFT)]):
+            tiles.grid_columnconfigure(j, weight=1)
+            f = ctk.CTkFrame(tiles, fg_color=tone, corner_radius=theme.RADIUS_INPUT)
+            f.grid(row=0, column=j, sticky="ew", padx=(0 if j == 0 else 6, 0))
+            ctk.CTkLabel(f, text=title, font=theme.F_TINY, text_color=theme.TEXT_SECONDARY,
+                         anchor="w").pack(anchor="w", padx=12, pady=(8, 0))
+            v = ctk.CTkLabel(f, text="–", font=(theme.FONT_FAMILY, 22, "bold"),
+                             text_color=theme.TEXT_PRIMARY, anchor="w")
+            v.pack(anchor="w", padx=12, pady=(0, 8))
+            self._tiles[key] = v
+
+        self.day_banner = ctk.CTkLabel(
+            body, text="Run Raw QC to see which profiles of the day can be used.",
+            font=theme.F_SMALL, text_color=theme.TEXT_PRIMARY, anchor="w", justify="left",
+            wraplength=820, fg_color=theme.CREAM_SOFT, corner_radius=theme.RADIUS_INPUT)
+        self.day_banner.grid(row=1, column=0, sticky="ew", pady=(0, 10), ipadx=10, ipady=8)
+        self.day_banner.bind("<Configure>", lambda e: self.day_banner.configure(wraplength=max(300, e.width - 30)))
+
+        ctrl = ctk.CTkFrame(body, fg_color="transparent")
+        ctrl.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(ctrl, text="View:", font=theme.F_SMALL, text_color=theme.TEXT_SECONDARY).pack(side="left")
+        ctk.CTkOptionMenu(
+            ctrl, variable=self.view, values=self.VIEWS, command=lambda *_: self.refresh(),
+            fg_color=theme.CARD_BG, button_color=theme.CARD_BG, button_hover_color=theme.CREAM_SOFT,
+            text_color=theme.TEXT_PRIMARY, dropdown_fg_color=theme.CARD_BG,
+            dropdown_text_color=theme.TEXT_PRIMARY, dropdown_hover_color=theme.CREAM,
+            corner_radius=theme.RADIUS_INPUT, height=30, font=theme.F_SMALL, width=220,
+        ).pack(side="left", padx=(8, 12))
+        ctk.CTkButton(ctrl, text="Save PNG", command=self._save_png,
+                      **theme.ghost_button_style(width=90, height=28)).pack(side="right")
+
+        self._stack = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=theme.RADIUS_INPUT,
+                                   border_width=1, border_color=theme.BORDER)
+        self._stack.grid(row=3, column=0, sticky="nsew")
+        self._stack.grid_columnconfigure(0, weight=1); self._stack.grid_rowconfigure(0, weight=1)
+
+        # table view
+        self._tree_wrap = tk.Frame(self._stack, bg=theme.CARD_BG)
+        self._tree_wrap.grid_columnconfigure(0, weight=1); self._tree_wrap.grid_rowconfigure(0, weight=1)
+        style = ttk.Style()
+        style.configure("RawQC.Treeview", font=(theme.FONT_FAMILY, 11), rowheight=26,
+                        background=theme.CARD_BG, fieldbackground=theme.CARD_BG)
+        style.configure("RawQC.Treeview.Heading", font=(theme.FONT_FAMILY, 11, "bold"))
+        cols = ("item", "name", "night", "day", "pwf", "status")
+        self.tree = ttk.Treeview(self._tree_wrap, columns=cols, show="headings", style="RawQC.Treeview")
+        for c, head, w, anchor in [("item", "Item", 70, "w"), ("name", "Criterion", 330, "w"),
+                                   ("night", "Night PASS", 90, "center"), ("day", "Day PASS", 90, "center"),
+                                   ("pwf", "PASS / WARN / FAIL", 160, "center"), ("status", "Status", 90, "center")]:
+            self.tree.heading(c, text=head)
+            self.tree.column(c, width=w, anchor=anchor, stretch=(c == "name"))
+        for st, bg in self.STATUS_BG.items():
+            self.tree.tag_configure(st, background=bg)
+        self.tree.tag_configure("context", foreground=theme.TEXT_MUTED)
+        sb = ttk.Scrollbar(self._tree_wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        sb.grid(row=0, column=1, sticky="ns", pady=6)
+
+        # usable-files view: one row per profile
+        self._use_wrap = tk.Frame(self._stack, bg=theme.CARD_BG)
+        self._use_wrap.grid_columnconfigure(0, weight=1); self._use_wrap.grid_rowconfigure(0, weight=1)
+        ucols = ("time", "acq", "dn", "shots", "ptop", "stop", "nrb", "delta", "why")
+        self.use_tree = ttk.Treeview(self._use_wrap, columns=ucols, show="headings", style="RawQC.Treeview")
+        for c, head, w, anchor in [("time", "Profile (end)", 100, "w"), ("acq", "Recorded (header)", 150, "center"),
+                                   ("dn", "D/N", 45, "center"), ("shots", "Shots", 55, "center"),
+                                   ("ptop", "∥ up to km", 95, "center"), ("stop", "⊥ up to km", 95, "center"),
+                                   ("nrb", "NRB / PBL", 115, "center"), ("delta", "δ", 115, "center"),
+                                   ("why", "Why (this file)", 520, "w")]:
+            self.use_tree.heading(c, text=head)
+            self.use_tree.column(c, width=w, anchor=anchor, stretch=(c == "why"))
+        for st, bg in self.USE_BG.items():
+            self.use_tree.tag_configure(st, background=bg)
+        usb = ttk.Scrollbar(self._use_wrap, orient="vertical", command=self.use_tree.yview)
+        uxs = ttk.Scrollbar(self._use_wrap, orient="horizontal", command=self.use_tree.xview)
+        self.use_tree.configure(yscrollcommand=usb.set, xscrollcommand=uxs.set)
+        self.use_tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=(6, 0))
+        usb.grid(row=0, column=1, sticky="ns", pady=6)
+        uxs.grid(row=1, column=0, sticky="ew", padx=(6, 0))
+
+        # figure view
+        self._fig_wrap = tk.Frame(self._stack, bg=theme.CARD_BG)
+        self._fig_wrap.grid_columnconfigure(0, weight=1); self._fig_wrap.grid_rowconfigure(0, weight=1)
+        self.fig = plt.Figure(figsize=(7, 6), dpi=100, facecolor=theme.CARD_BG)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_wrap)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+        self._use_wrap.grid(row=0, column=0, sticky="nsew")
+        return card
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+    def _log(self, msg): self.console.log(msg)
+    def _safe(self, fn, *a, **kw): self.after(0, lambda: fn(*a, **kw))
+    def _safe_log(self, msg): self._safe(self._log, msg)
+
+    def _apply_preset(self, name):
+        p = self.PRESETS.get(name)
+        if not p:
+            return
+        shots, bin_m, hv, alt = p
+        self.plan_shots.set(str(shots)); self.plan_bin.set(f"{bin_m:g}")
+        self.plan_hv.set(str(hv)); self.plan_alt.set(f"{alt:g}")
+        self.case_name.set(name.split(" · ")[0].replace("Case ", "C"))
+
+    def _pick_folder(self):
+        p = filedialog.askdirectory(title="Raw data folder")
+        if p:
+            self.folder.set(p)
+
+    def _pick_output(self):
+        p = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+        if p:
+            self.out_path.set(p)
+
+    def _open_sheet(self):
+        p = self.out_path.get().strip()
+        if p and os.path.exists(p):
+            try:
+                os.startfile(p)  # type: ignore[attr-defined]
+            except Exception as e:
+                messagebox.showerror("Open", str(e))
+        else:
+            messagebox.showinfo("Open", "Run Raw QC first — no check sheet yet.")
+
+    # ── Run ────────────────────────────────────────────────────────────────
+    def run(self):
+        folder = self.folder.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", "Choose the raw data folder."); return
+        try:
+            plan = dict(shots=int(float(self.plan_shots.get())), bin_m=float(self.plan_bin.get()),
+                        hv=int(float(self.plan_hv.get())), altitude_km=float(self.plan_alt.get()))
+        except Exception:
+            messagebox.showerror("Error", "Plan values must be numbers."); return
+        name = self.case_name.get().strip() or "Case"
+        out_typed = self.out_path.get().strip()
+
+        self.run_btn.configure(state="disabled")
+        self.pb.configure(mode="indeterminate"); self.pb.start()
+        self.status.set("Reading raw files…", "running")
+        self._log(f"=== START Raw QC · {folder} ===")
+        self._log(f"plan: {plan['shots']} shots · {plan['bin_m']:g} m · HV {plan['hv']} V · "
+                  f"{plan['altitude_km']:g} km")
+
+        def worker():
+            try:
+                D = _rq.check_folder(Path(folder), plan=plan)
+                if D is None or not len(D):
+                    raise ValueError("No readable Licel raw file in this folder.")
+                t0 = pd.to_datetime(D["time"]).dropna()
+                date = t0.min().strftime("%Y-%m-%d") if len(t0) else ""
+                out = out_typed or str(Path(folder) / f"RawQC-{date or 'case'}.xlsx")
+                summ = _rq.summarize(D)
+                sc = _rq.score(summ)
+                try:
+                    _rqs.write_case_workbook(D, Path(out), name=name, folder=folder, plan=plan, date=date,
+                                             condition=f"{name} · {plan['bin_m']:g} m · {plan['shots']} shot · HV {plan['hv']} V")
+                    self._safe_log(f"[OK] Check sheet: {Path(out).resolve()}")
+                except PermissionError:
+                    self._safe_log(f"[WARN] {out} is open in Excel — close it and run again to save the sheet.")
+                self._df, self._summary = D, summ
+                self._safe(self.out_path.set, out)
+                self._safe(self._report, D, summ, sc)
+                self._safe(self.app_state.set_rawqc, out, D, folder)
+                self._safe(self.status.set, f"Done — {sc['passed']} / {sc['total']} passed", "ok")
+            except Exception as e:
+                self._safe(self._log, f"[FAILED] {e}")
+                self._safe(self.status.set, "Failed", "error")
+                self._safe(messagebox.showerror, "Raw QC failed", str(e))
+            finally:
+                self._safe(self.pb.stop)
+                self._safe(self.pb.configure, mode="determinate")
+                self._safe(self.pb.set, 1.0)
+                self._safe(self.run_btn.configure, state="normal")
+                self._safe(self._log, "=== END ===")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _report(self, D: pd.DataFrame, summ: pd.DataFrame, sc: Dict[str, int]):
+        ok = D["shots"] >= _rq.CRITERIA["A1"]["min_shots"]
+        n_test = int((~ok).sum())
+        self._log(f"{len(D)} file(s): {int((ok & D.night).sum())} night, {int((ok & ~D.night).sum())} day, "
+                  f"{n_test} test file(s) under 1500 shots")
+        self._log(f"score: {sc['passed']} / {sc['total']} passed · {sc['partial']} partial · {sc['failed']} failed")
+        for _, r in summ.iterrows():
+            if r["status"] in ("ไม่ผ่าน", "บางส่วน"):
+                tag = "context" if not r["scored"] else r["status"]
+                self._log(f"  {r['item']:<5} {r['status']:<8} P/W/F {r['n_pass']}/{r['n_warn']}/{r['n_fail']}"
+                          f"  ({tag if tag == 'context' else r['name']})")
+        # the two acquisition problems worth shouting about
+        night = D[ok & D.night]
+        if len(night):
+            pk = night["par_peak_mv"].median()
+            if pk > 250:
+                self._log(f"[!] ∥ analog peak at night {pk:.0f} mV (limit 250) — near field clipped")
+            bg = night[["par_bg_photon_mhz", "perp_bg_photon_mhz"]].median()
+            if (bg > 0.5).any():
+                self._log(f"[!] night photon background ∥ {bg.iloc[0]:.2f} / ⊥ {bg.iloc[1]:.2f} MHz "
+                          f"(baseline 0.1–0.2) — look for stray light, record a dark file")
+        dd = _rq.day_decision(D)
+        common = sorted(set(dd["nrb_common"]) | set(dd["delta_common"]))
+        banner = (f"NRB / PBL: {dd['nrb_verdict']} — ใช้ได้ {dd['nrb']['USABLE']} · มีข้อจำกัด {dd['nrb']['LIMITED']} · "
+                  f"ใช้ไม่ได้ {dd['nrb']['UNUSABLE']}   |   ช่วงที่ใช้ได้: {', '.join(dd['nrb_periods']) or '–'}\n"
+                  f"δ: {dd['delta_verdict']} — ใช้ได้ {dd['delta']['USABLE']} · มีข้อจำกัด {dd['delta']['LIMITED']} · "
+                  f"ใช้ไม่ได้ {dd['delta']['UNUSABLE']}   |   ช่วงที่ใช้ได้: {', '.join(dd['delta_periods']) or '–'}")
+        if common:
+            banner += "\nข้อจำกัดของทั้งวัน: " + "; ".join(common)
+        okf = D[D["shots"] >= _rq.CRITERIA["A1"]["min_shots"]]
+        if len(okf) and (okf["A2"] == "FAIL").all():
+            # every file disagrees with the plan: almost always the wrong preset
+            bins = sorted(okf["bin_m"].unique())
+            match = [n for n, pl in self.PRESETS.items() if pl and abs(pl[1] - bins[0]) < 1e-6
+                     and abs(pl[0] - okf["shots"].median()) <= 0.05 * pl[0]]
+            hint = (f"⚠ header ไม่ตรงแผนทุกไฟล์ ({okf['A2_note'].iloc[0]}) — เลือก plan ผิดหรือเปล่า?"
+                    + (f" ไฟล์ตรงกับ '{match[0]}'" if match else "") + " แล้วรันใหม่\n")
+            banner = hint + banner
+        self.day_banner.configure(text=banner)
+        self._log("--- usable profiles ---")
+        self._log(banner)
+        for _, r in D.sort_values("time").iterrows():
+            if r["shots"] >= _rq.CRITERIA["A1"]["min_shots"] and "UNUSABLE" in (r["use_nrb"], r["use_delta"]):
+                self._log(f"  {pd.Timestamp(r['time']):%H:%M}  NRB {_rq.USE_TEXT[r['use_nrb']]} · "
+                          f"δ {_rq.USE_TEXT[r['use_delta']]} — {r['use_delta_reason'] or r['use_nrb_reason']}")
+        self._tiles["passed"].configure(text=f"{sc['passed']} / {sc['total']}")
+        self._tiles["partial"].configure(text=str(sc["partial"]))
+        self._tiles["failed"].configure(text=str(sc["failed"]))
+        self._tiles["files"].configure(text=f"{int((ok & D.night).sum())} / {int((ok & ~D.night).sum())}"
+                                             + (f"  +{n_test} test" if n_test else ""))
+        self.refresh()
+
+    # ── Views ──────────────────────────────────────────────────────────────
+    def refresh(self):
+        if self._df is None:
+            return
+        v = self.view.get()
+        for w in (self._use_wrap, self._tree_wrap, self._fig_wrap):
+            w.grid_remove()
+        if v == self.VIEWS[0]:
+            self._use_wrap.grid(row=0, column=0, sticky="nsew")
+            self._fill_use_tree()
+            return
+        if v == self.VIEWS[1]:
+            self._tree_wrap.grid(row=0, column=0, sticky="nsew")
+            self._fill_tree()
+            return
+        self._fig_wrap.grid(row=0, column=0, sticky="nsew")
+        self.fig.clear()
+        if v == self.VIEWS[2]:
+            self._plot_matrix()
+        else:
+            self._plot_series()
+        self.canvas.draw_idle()
+
+    def _fill_use_tree(self):
+        self.use_tree.delete(*self.use_tree.get_children())
+        D = self._df.sort_values("time")
+        dd = _rq.day_decision(self._df)
+        common = set(dd["nrb_common"]) | set(dd["delta_common"])
+        order = ["USABLE", "LIMITED", "UNUSABLE"]
+        for _, r in D.iterrows():
+            t = pd.Timestamp(r["time"])
+            a0, a1 = r.get("acq_start"), r.get("acq_stop")
+            acq = (f"{pd.Timestamp(a0):%H:%M:%S}–{pd.Timestamp(a1):%H:%M:%S}"
+                   if pd.notna(a0) and pd.notna(a1) else "")
+            test = r["shots"] < _rq.CRITERIA["A1"]["min_shots"]
+            # day-wide limitations sit in the banner; the row lists what is particular to it
+            parts = []
+            for txt in (r["use_nrb_reason"], r["use_delta_reason"]):
+                for x in [y.strip() for y in str(txt).split(";") if y.strip()]:
+                    if x not in common and x not in parts:
+                        parts.append(x)
+            worst = max((r["use_nrb"], r["use_delta"]), key=order.index)
+            self.use_tree.insert("", "end", tags=(worst,), values=(
+                f"{t:%d/%m %H:%M}" if pd.notna(t) else r["file"], acq,
+                "N" if r["night"] else "D", int(r["shots"]),
+                "–" if test else f"{r['par_top_m'] / 1000:.1f}",
+                "–" if test else f"{r['perp_top_m'] / 1000:.1f}",
+                _rq.USE_TEXT[r["use_nrb"]], _rq.USE_TEXT[r["use_delta"]],
+                "; ".join(parts) if parts else ("เฉพาะข้อจำกัดของทั้งวัน" if worst != "USABLE" else "")))
+
+    def _fill_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        fmt = lambda x: "–" if not np.isfinite(x) else f"{x:.0%}"
+        for _, r in self._summary.iterrows():
+            tags = (r["status"],) if r["scored"] else (r["status"], "context")
+            name = r["name"] if r["scored"] else f"{r['name']}  (not scored)"
+            self.tree.insert("", "end", values=(r["item"], name, fmt(r["night_pass"]), fmt(r["day_pass"]),
+                                                f"{r['n_pass']} / {r['n_warn']} / {r['n_fail']}", r["status"]),
+                             tags=tags)
+
+    def _plot_matrix(self):
+        from matplotlib.colors import ListedColormap
+        D = self._df
+        cols = _rq.VERDICT_COLS
+        labels = [lab for lab, _, _ in _rq.SCORED + _rq.CONTEXT]
+        code = {"PASS": 0, "WARN": 1, "FAIL": 2, "NA": 3}
+        M = np.array([[code.get(str(D.iloc[i][c]), 3) for c in cols] for i in range(len(D))])
+        ax = self.fig.add_subplot(111)
+        cmap = ListedColormap([self.VERDICT_COLORS[k] for k in ("PASS", "WARN", "FAIL", "NA")])
+        ax.imshow(M, cmap=cmap, vmin=-0.5, vmax=3.5, aspect="auto", interpolation="nearest")
+        # the plot font has no ∥/⊥ glyphs: spell the channel out
+        labels = [lab.replace("∥", "par").replace("⊥", "perp") for lab in labels]
+        ax.set_xticks(range(len(cols))); ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+        ylab = []
+        for i in range(len(D)):
+            t = pd.Timestamp(D.iloc[i]["time"])
+            tag = "N" if D.iloc[i]["night"] else "D"
+            test = "  test" if D.iloc[i]["shots"] < _rq.CRITERIA["A1"]["min_shots"] else ""
+            ylab.append(f"{t:%d/%m %H:%M} {tag}{test}" if pd.notna(t) else D.iloc[i]["file"])
+        ax.set_yticks(range(len(D))); ax.set_yticklabels(ylab, fontsize=7 if len(D) > 30 else 8)
+        ax.set_xticks(np.arange(-0.5, len(cols)), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(D)), minor=True)
+        ax.grid(which="minor", color=theme.CARD_BG, linewidth=1.2)
+        ax.tick_params(which="minor", length=0)
+        n_sc = len(_rq.SCORED)
+        ax.axvline(n_sc - 0.5, color=theme.TEXT_PRIMARY, linewidth=1.2)
+        for s in ax.spines.values():
+            s.set_visible(False)
+        from matplotlib.patches import Patch
+        ax.legend(handles=[Patch(color=self.VERDICT_COLORS[k], label=k) for k in ("PASS", "WARN", "FAIL", "NA")],
+                  loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4, fontsize=8)
+        ax.set_title("Each file against each criterion  (right of the line: not scored)", fontsize=10, pad=24)
+        self.fig.tight_layout()
+
+    def _plot_series(self):
+        D = self._df[self._df["shots"] >= _rq.CRITERIA["A1"]["min_shots"]].copy()
+        t = pd.to_datetime(D["time"])
+        axs = self.fig.subplots(4, 1, sharex=True)
+        night = D["night"].to_numpy(bool)
+
+        def shade(ax):
+            for i in range(len(D)):
+                if night[i]:
+                    ax.axvspan(t.iloc[i] - pd.Timedelta(minutes=15), t.iloc[i] + pd.Timedelta(minutes=15),
+                               color=theme.NAVY_SOFT, linewidth=0, zorder=0)
+
+        def pair(ax, cp, cs, ylabel, limit=None, limit_label="", log=False):
+            shade(ax)
+            ax.plot(t, D[cp], "o-", color=self.PAR_COLOR, ms=3.5, lw=1.2, label="parallel")
+            ax.plot(t, D[cs], "s-", color=self.PERP_COLOR, ms=3.5, lw=1.2, label="perpendicular")
+            for y, lab in (limit or []):
+                ax.axhline(y, color=theme.TEXT_SECONDARY, ls="--", lw=0.9)
+                ax.text(1.0, y, f" {lab}", transform=ax.get_yaxis_transform(), va="center", ha="left",
+                        fontsize=7, color=theme.TEXT_SECONDARY)
+            if log:
+                ax.set_yscale("log")
+            ax.set_ylabel(ylabel, fontsize=8)
+            ax.grid(True, alpha=0.4)
+
+        pair(axs[0], "par_peak_mv", "perp_peak_mv", "Analog peak\n[mV]", [(250, "B1 250")])
+        pair(axs[1], "par_pmt_uA", "perp_pmt_uA", "PMT current\n[µA]", [(100, "B3 100")])
+        pair(axs[2], "par_bg_photon_mhz", "perp_bg_photon_mhz", "Photon bg\n[MHz]",
+             [(10, "C1 10"), (0.5, "C2 0.5")], log=True)
+        shade(axs[3])
+        axs[3].plot(t, D["par_snr_3km"].clip(lower=0.05), "o-", color=self.PAR_COLOR, ms=3.5, lw=1.2,
+                    label="parallel at 3 km (E1)")
+        axs[3].plot(t, D["perp_snr_5km"].clip(lower=0.05), "s-", color=self.PERP_COLOR, ms=3.5, lw=1.2,
+                    label="perpendicular at 5 km (E2)")
+        for y, lab in ((10, "E1 10"), (3, "E2 3")):
+            axs[3].axhline(y, color=theme.TEXT_SECONDARY, ls="--", lw=0.9)
+            axs[3].text(1.0, y, f" {lab}", transform=axs[3].get_yaxis_transform(), va="center",
+                        fontsize=7, color=theme.TEXT_SECONDARY)
+        axs[3].set_yscale("log"); axs[3].set_ylabel("SNR\n(per 30 m)", fontsize=8)
+        axs[3].grid(True, alpha=0.4)
+        axs[3].legend(loc="upper left", fontsize=7, ncol=2)
+        axs[0].legend(loc="upper left", fontsize=7, ncol=2)
+        axs[0].set_title("Acquisition quality over the day  (shaded = night)", fontsize=10)
+        import matplotlib.dates as mdates
+        axs[3].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        for ax in axs:
+            ax.tick_params(labelsize=7)
+        self.fig.tight_layout()
+
+    def _save_png(self):
+        if self._df is None or self.view.get() in self.VIEWS[:2]:
+            messagebox.showinfo("Save PNG", "Switch to a figure view first."); return
+        out = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png")])
+        if out:
+            self.fig.savefig(out, dpi=200, facecolor="white")
+            self._log(f"[OK] Saved {out}")
+
+
 class PlaceholderPage(ctk.CTkFrame):
     def __init__(self, master, step_label: str, description: str):
         super().__init__(master, fg_color="transparent")
@@ -9460,6 +10081,7 @@ class App(ctk.CTk):
 
         # Real pages (all 5 steps migrated)
         self.pages["step1"] = Step1Page(self.content, self.app_state)
+        self.pages["rawqc"] = RawQCPage(self.content, self.app_state)
         self.pages["step2"] = Step2Page(self.content, self.app_state)
         self.pages["step3"] = Step3Page(self.content, self.app_state)
         self.pages["step4"] = Step4Page(self.content, self.app_state)
@@ -9473,6 +10095,7 @@ class App(ctk.CTk):
     def _desc_for(step_id: str) -> str:
         return {
             "step1": "Build the rmin-rmax search table from MPL data.",
+            "rawqc": "Check raw Licel files against the signal-quality criteria before processing.",
             "step7": "Validate a prototype case against the Mini-MPL reference.",
             "step2": "Convert TR40 .dat files into a daily NRB profile workbook.",
             "step3": "Detect aerosol layer top (ALT) using FFT + HWCT.",

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -161,13 +161,17 @@ def _read_qc(xl: pd.ExcelFile) -> Dict:
     mode = (q["par_glue_fit_mode"].astype(str) if "par_glue_fit_mode" in q.columns
             else pd.Series("", index=q.index))
     status = q["status"].astype(str) if "status" in q.columns else pd.Series("ok", index=q.index)
+    rawqc_cols = [c for c in q.columns if str(c).startswith("rawqc_")]
     out = {}
     for i, t in enumerate(pd.to_datetime(q["time"], errors="coerce")):
         if pd.notna(t):
             r2_i = float(r2.iloc[i])
             if mode.iloc[i] in ("night_gain_override", "fixed_gain_fallback"):
                 r2_i = float("nan")
-            row = {"shots": float(shots.iloc[i]), "bg_mhz": float(bg.iloc[i]), "glue_r2": r2_i}
+            row = {"shots": float(shots.iloc[i]), "bg_mhz": float(bg.iloc[i]), "glue_r2": r2_i,
+                   # raw-data quality verdicts from the Raw QC step, if Step 2 attached them
+                   "rawqc": {c[len("rawqc_"):]: str(q[c].iloc[i]) for c in rawqc_cols
+                             if pd.notna(q[c].iloc[i])}}
             # Files Step 2 skipped (too few shots) have no profile column; their
             # rows sit seconds from the real profile and must never shadow it.
             if status.iloc[i].startswith("skipped"):
@@ -506,6 +510,7 @@ def run_validation(
     cloud_screen: bool = True,
     cloud_margin_m: float = CLOUD_BASE_MARGIN_M,
     cloud_window_min: float = CLOUD_TIME_WINDOW_MIN,
+    rawqc_exclude: Sequence[str] = (),
     logger: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, object]:
     """Validate one prototype case against the Mini-MPL reference.
@@ -558,6 +563,31 @@ def run_validation(
     else:
         log(f"[{label}] shot filter: every profile has >= {min_shots:g} shots")
 
+    # 1b) Drop profiles whose raw data FAILED the chosen Raw QC criteria
+    #     (verdict columns such as "E2", "C2p", "B1p").
+    excl = [str(c).strip() for c in rawqc_exclude if str(c).strip()]
+    dropped_rawqc: List[str] = []
+    if excl:
+        have_rawqc = any(r.get("rawqc") for r in qc.values())
+        if not have_rawqc:
+            log(f"[{label}] Raw QC filter unavailable — this workbook has no rawqc_ columns. "
+                f"Run the Raw QC step, then Step 2 with 'Attach Raw QC' ticked.")
+        else:
+            keep2 = []
+            for t in kept:
+                rq_row = (_qc_for(qc, t) or {}).get("rawqc", {})
+                # "NRB" / "DELTA" drop profiles Raw QC judged unusable for that product
+                failed = [c for c in excl
+                          if rq_row.get(c) == "FAIL"
+                          or (c.upper() in ("NRB", "DELTA") and rq_row.get(c.lower()) == "UNUSABLE")]
+                if failed:
+                    dropped_rawqc.append(f"{pd.Timestamp(t).strftime('%H:%M')} ({', '.join(failed)})")
+                else:
+                    keep2.append(t)
+            kept = keep2
+            log(f"[{label}] Raw QC filter ({', '.join(excl)}): dropped {len(dropped_rawqc)} profile(s)"
+                + (": " + "; ".join(dropped_rawqc) if dropped_rawqc else ""))
+
     # 2) Day / night from the signal (background + glue fit), clock as fallback.
     day_night: Dict = {}
     for t in kept:
@@ -576,9 +606,11 @@ def run_validation(
     log(f"[{label}] {len(all_ts)} prototype profile(s), {len(kept)} after the shot "
         f"filter, {len(proto_ts)} '{tf}', {len(pairs)} matched to MPL")
     if not pairs:
+        why = (f" The Raw QC filter ({', '.join(excl)}) removed {len(dropped_rawqc)} profile(s) — "
+               f"relax it." if dropped_rawqc else "")
         raise ValueError(
             f"No prototype profile matched an MPL profile within "
-            f"{match_tolerance_min:g} min under the '{tf}' filter.")
+            f"{match_tolerance_min:g} min under the '{tf}' filter.{why}")
 
     screen = bool(cloud_screen) and mpl.get("clouds") is not None
     if cloud_screen and not screen:
@@ -650,6 +682,9 @@ def run_validation(
                      "shots": qrow.get("shots", np.nan),
                      "bg_par_mhz": qrow.get("bg_mhz", np.nan),
                      "glue_r2": qrow.get("glue_r2", np.nan),
+                     "rawqc_fails": qrow.get("rawqc", {}).get("fails", ""),
+                     "rawqc_nrb": qrow.get("rawqc", {}).get("nrb", ""),
+                     "rawqc_delta": qrow.get("rawqc", {}).get("delta", ""),
                      "day_night": day_night[p_ts][0],
                      "day_night_reason": day_night[p_ts][1],
                      **res})
@@ -721,6 +756,8 @@ def run_validation(
         "SNR min": snr_min,
         "Min shots": min_shots,
         "Profiles dropped (shots)": len(dropped_shots),
+        "Raw QC filter": ", ".join(excl) if excl else "off",
+        "Profiles dropped (Raw QC)": len(dropped_rawqc),
         "Cloud screen": (f"MPL base − {cloud_margin_m:.0f} m, ±{cloud_window_min:.0f} min"
                          if screen else "off"),
         "Profiles cut by cloud": n_screened,
