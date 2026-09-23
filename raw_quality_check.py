@@ -47,9 +47,13 @@ CRITERIA = {
     "C1": dict(name="Photon sky background", unit="MHz",
                pass_="< 10 MHz (below min toggle)", warn="10–40 MHz", fail="≥ 40 MHz (no night toggle window)",
                pass_max=10.0, warn_max=40.0),
+    # 22 Sep 2026: with the room dark and the monitor off this reads 0.00 MHz, so anything
+    # above ~0.1 is stray light in the room, not the PMT (PM-HV manual ch. 4: a dark PMT
+    # counts almost nothing). 08-09 Sep read 0.12-0.18 (a little light), 14-15 Sep 1.5-1.8
+    # (the monitor left on).
     "C2": dict(name="Night photon background (dark + sky, 19:00–05:30)", unit="MHz",
-               pass_="≤ 0.5 MHz", warn="0.5–1 MHz", fail="> 1 MHz (08–09 Sep baseline 0.12–0.18)",
-               pass_max=0.5, warn_max=1.0),
+               pass_="≤ 0.1 MHz (dark room)", warn="0.1–0.5 MHz", fail="> 0.5 MHz (stray light)",
+               pass_max=0.1, warn_max=0.5),
     "D1": dict(name="Glue window, night (10–40 MHz, analog > 200σ, no overflow, below cloud)", unit="m",
                pass_="span ≥ 300 m and ≥ 20 bins", warn="-", fail="no window", min_span=300.0),
     "D2": dict(name="Glue gain vs instrument gain (3.75 m: ∥ 87, ⊥ 96; 30 m: ∥ 90, ⊥ 97 MHz/mV)", unit="%",
@@ -60,7 +64,7 @@ CRITERIA = {
                pass_="≥ 3", warn="1–3", fail="< 1", pass_min=3.0, warn_min=1.0),
     "F1": dict(name="⊥/∥ ratio at 4.5–5.5 km vs night median (C stability)", unit="%",
                pass_="within ±10 %", warn="±10–20 %", fail="> ±20 %", pass_max=10.0, warn_max=20.0),
-    "G1": dict(name="Analog-overloading cloud below 3 km", unit="m",
+    "G1": dict(name="Cloud below 3 km (jump ≥ 4× in the range-corrected analog)", unit="m",
                pass_="none", warn="cloud (weather, not a fault)", fail="-", max_base=3000.0),
 }
 
@@ -112,6 +116,38 @@ def _block_snr(counts: np.ndarray, bg_counts: float, n_bg: int, nb: int) -> np.n
     return s / np.sqrt(np.where(var > 0, var, np.nan))
 
 
+def cloud_base_m(r_m: np.ndarray, analog_raw: np.ndarray, *, bg_analog_mv: float,
+                 analog_noise_mv: float, min_ratio: float = 4.0, min_peak_snr: float = 10.0,
+                 max_range_m: float = 8000.0) -> float:
+    """Range of the first cloud, or NaN — the same jump test as nrb_engine.glue_cloud_base_m
+    but without its "the cloud must overload the analog (>= 100 mV)" condition, which is
+    right for the glue and too blunt for a weather flag: on 2026-09-22 15:37 a cloud at
+    1.7 km peaked at 175 mV raw (97.8 mV after the 90 m median) and went unflagged."""
+    r = np.asarray(r_m, float); a = np.asarray(analog_raw, float)
+    if r.size < 10 or not np.isfinite(bg_analog_mv):
+        return np.nan
+    dr = float(np.nanmedian(np.diff(r)))
+    if not np.isfinite(dr) or dr <= 0:
+        return np.nan
+    n_s = max(1, int(round(ne.GLUE_CLOUD_SMOOTH_M / dr)))
+    n_b = max(1, int(round(ne.GLUE_CLOUD_BELOW_M / dr)))
+    n_j = max(1, int(round(ne.GLUE_CLOUD_JUMP_M / dr)))
+    sig = pd.Series(a - float(bg_analog_mv)).rolling(n_s, center=True, min_periods=1).median()
+    rc = sig * r ** 2
+    below = rc.rolling(n_b, min_periods=1).median().shift(1)
+    above = rc[::-1].rolling(n_j, min_periods=1).max()[::-1]
+    sig_above = sig[::-1].rolling(n_j, min_periods=1).max()[::-1]
+    noise = float(analog_noise_mv) if np.isfinite(analog_noise_mv) and analog_noise_mv > 0 else 0.0
+    noise_s = noise / np.sqrt(n_s)
+    # only the troposphere the flag is about: past ~8 km the range-corrected noise itself
+    # jumps by more than 4x and every profile would "have a cloud"
+    hit = ((r >= ne.GLUE_CLOUD_MIN_RANGE_M) & (r <= max_range_m) & (below.to_numpy() > 0)
+           & (sig_above.to_numpy() >= min_peak_snr * noise_s)
+           & (above.to_numpy() >= min_ratio * below.to_numpy()))
+    idx = np.flatnonzero(hit)
+    return float(r[idx[0]]) if idx.size else np.nan
+
+
 def measure_file(path: Path) -> Optional[Dict]:
     """Raw metrics of one Licel file; None if it is not a readable raw file."""
     try:
@@ -152,8 +188,9 @@ def measure_file(path: Path) -> Optional[Dict]:
         out[f"{ch}_peak_r_m"] = float(r[int(np.argmax(A - bgA))])
         out[f"{ch}_overflow_bins"] = int(flag.sum())
 
-        cb = ne.glue_cloud_base_m(r, A, bg_analog_mv=bgA, analog_noise_mv=sA)
+        cb = ne.glue_cloud_base_m(r, A, bg_analog_mv=bgA, analog_noise_mv=sA)   # overloading cloud (glue)
         out[f"{ch}_cloud_base_m"] = cb
+        out[f"{ch}_cloud_any_m"] = cloud_base_m(r, A, bg_analog_mv=bgA, analog_noise_mv=sA)
         cand = (~flag & (P >= ne.NIGHT_MIN_TOGGLE_MHZ) & (P <= ne.NIGHT_MAX_TOGGLE_MHZ)
                 & (N * DEAD_TIME[ch] * 1e-3 < ne.DT_VALID_MAX_FRACTION))
         if np.isfinite(cb):
@@ -258,7 +295,7 @@ def check_folder(folder: Path, *, plan: Optional[Dict] = None) -> pd.DataFrame:
         dev_r = abs(row.ratio_5km / ref_ratio - 1) * 100 if (np.isfinite(ref_ratio) and row.perp_snr_5km >= 3 and row.par_snr_5km >= 3) else np.nan
         D.loc[i, "ratio_dev_pct"] = dev_r
         v["F1"] = verdict("F1", dev_r) if row.night else "NA"
-        cb = row.par_cloud_base_m
+        cb = row.par_cloud_any_m
         v["G1"] = "WARN" if np.isfinite(cb) and cb < CRITERIA["G1"]["max_base"] else "PASS"
         V[i] = v
     VD = pd.DataFrame.from_dict(V, orient="index")
@@ -317,7 +354,7 @@ def add_usability(D: pd.DataFrame) -> pd.DataFrame:
     D["day_cal_files"] = n_cal
     for _, row in D.iterrows():
         r = row.to_dict()
-        cloud = r.get("par_cloud_base_m", np.nan)
+        cloud = r.get("par_cloud_any_m", np.nan)
         cloud = float(cloud) if cloud is not None and np.isfinite(cloud) else np.nan
         blk: List[str] = []
         if r.get("A1") == "FAIL":
@@ -397,7 +434,13 @@ def usable_periods(D: pd.DataFrame, col: str, *, allow_limited: bool = True) -> 
             runs.append(cur); cur = []
     if cur:
         runs.append(cur)
-    return [f"{c[0]:%H:%M}" if len(c) == 1 else f"{c[0]:%H:%M}–{c[-1]:%H:%M}" for c in runs]
+    def _fmt(c):
+        # a run that crosses midnight needs its dates, otherwise 09:30-09:45 reads as 15 minutes
+        same_day = c[0].date() == c[-1].date()
+        if len(c) == 1:
+            return f"{c[0]:%H:%M}"
+        return f"{c[0]:%H:%M}–{c[-1]:%H:%M}" if same_day else f"{c[0]:%d/%m %H:%M}–{c[-1]:%d/%m %H:%M}"
+    return [_fmt(c) for c in runs]
 
 
 def day_decision(D: pd.DataFrame) -> Dict[str, object]:

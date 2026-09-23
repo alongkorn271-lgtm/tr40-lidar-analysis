@@ -9511,6 +9511,33 @@ class RawQCPage(ctk.CTkFrame):
     PAR_COLOR, PERP_COLOR = "#1F5FA6", "#B5541F"
     VIEWS = ["Usable files (by profile)", "Summary by criterion", "Files × criteria", "Time series"]
     USE_BG = {"USABLE": "#D7F4E8", "LIMITED": "#FFF1CC", "UNUSABLE": "#FFE0E6"}
+    # matrix columns: plain-language label (the plot font has no Thai / ∥ ⊥ glyphs),
+    # the measured value behind the verdict, its unit
+    MATRIX_COLS = {
+        "A1": ("Shots", "shots", ""), "A2": ("Header\n= plan", "A2_note", ""),
+        "B1p": ("Analog\npeak par", "par_peak_mv", "mV"), "B1s": ("Analog\npeak perp", "perp_peak_mv", "mV"),
+        "B3p": ("PMT\ncurrent par", "par_pmt_uA", "µA"), "B3s": ("PMT\ncurrent perp", "perp_pmt_uA", "µA"),
+        "C1p": ("Sky bg\npar", "par_bg_photon_mhz", "MHz"), "C1s": ("Sky bg\nperp", "perp_bg_photon_mhz", "MHz"),
+        "C2p": ("Night bg\npar", "par_bg_photon_mhz", "MHz"), "C2s": ("Night bg\nperp", "perp_bg_photon_mhz", "MHz"),
+        "D1p": ("Glue\nwindow par", "par_glue_span_m", "m"), "D1s": ("Glue\nwindow perp", "perp_glue_span_m", "m"),
+        "D2p": ("Glue\ngain par", "par_gain_dev_pct", "% off"), "D2s": ("Glue\ngain perp", "perp_gain_dev_pct", "% off"),
+        "E1": ("SNR 3 km\npar", "par_snr_3km", ""), "E2": ("SNR 5 km\nperp", "perp_snr_5km", ""),
+        "F1": ("perp/par\nratio", "ratio_dev_pct", "% off"),
+        "B2p": ("Overflow\npar", "par_overflow_bins", "bins"), "B2s": ("Overflow\nperp", "perp_overflow_bins", "bins"),
+        "G1": ("Low\ncloud", "par_cloud_base_m", "m"),
+    }
+    MATRIX_GROUPS = [("Acquisition", 2), ("Analog", 4), ("Photon background", 4), ("Glue (night)", 4),
+                     ("SNR", 2), ("Ratio", 1), ("Info — not scored", 3)]
+    VIEW_HELP = [
+        "หนึ่งแถว = หนึ่ง profile · เวลา = เวลาสิ้นสุดการเก็บ (ชื่อไฟล์) · ∥/⊥ up to = ความสูงที่สัญญาณยังใช้ได้ "
+        "(SNR ≥ 3 ต่อ 30 m) · สีแถว = ผลที่แย่กว่าระหว่าง NRB กับ δ (เขียว ใช้ได้ · เหลือง มีข้อจำกัด · แดง ใช้ไม่ได้)",
+        "หนึ่งแถว = หนึ่งเกณฑ์ · Night/Day PASS = สัดส่วนไฟล์ที่ผ่าน · สถานะ: ผ่าน = PASS ≥ 90 % ของไฟล์, "
+        "บางส่วน = PASS+WARN ≥ 50 %, ไม่ผ่าน = ต่ำกว่านั้น · ตัวเทา = ข้อมูลประกอบ ไม่นับคะแนน",
+        "แถว = ไฟล์ (เวลาสิ้นสุด · D กลางวัน / N กลางคืน) · คอลัมน์ = เกณฑ์ · เขียว ผ่าน · เหลือง เกือบถึงขีด · "
+        "แดง ไม่ผ่าน · เทา ไม่ได้ตรวจ (เกณฑ์กลางคืนกับไฟล์กลางวัน หรือไฟล์ทดสอบ) · ชี้เมาส์ที่ช่องเพื่อดูค่าที่วัดได้และเกณฑ์",
+        "ค่าที่วัดได้ของแต่ละไฟล์ตามเวลา · น้ำเงิน = ∥ (parallel) · ส้ม = ⊥ (perpendicular) · เส้นประ = ขีดของเกณฑ์ · "
+        "แถบเทา = กลางคืน · ปุ่ม Open large เปิดรูปในหน้าต่างใหญ่",
+    ]
 
     def __init__(self, master, app_state: AppState):
         super().__init__(master, fg_color="transparent")
@@ -9634,7 +9661,7 @@ class RawQCPage(ctk.CTkFrame):
     def _build_result_card(self, parent) -> "Card":
         card = Card(parent, title="Raw data quality", icon="📋")
         body = card.body
-        body.grid_rowconfigure(3, weight=1)
+        body.grid_rowconfigure(4, weight=1)
 
         tiles = ctk.CTkFrame(body, fg_color="transparent")
         tiles.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -9672,10 +9699,17 @@ class RawQCPage(ctk.CTkFrame):
         ).pack(side="left", padx=(8, 12))
         ctk.CTkButton(ctrl, text="Save PNG", command=self._save_png,
                       **theme.ghost_button_style(width=90, height=28)).pack(side="right")
+        ctk.CTkButton(ctrl, text="Open large", command=self._open_large,
+                      **theme.ghost_button_style(width=100, height=28)).pack(side="right", padx=(0, 6))
+
+        self.view_help = ctk.CTkLabel(body, text=self.VIEW_HELP[0], font=theme.F_TINY,
+                                      text_color=theme.TEXT_SECONDARY, anchor="w", justify="left", wraplength=820)
+        self.view_help.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        self.view_help.bind("<Configure>", lambda e: self.view_help.configure(wraplength=max(300, e.width - 10)))
 
         self._stack = ctk.CTkFrame(body, fg_color=theme.CARD_BG, corner_radius=theme.RADIUS_INPUT,
                                    border_width=1, border_color=theme.BORDER)
-        self._stack.grid(row=3, column=0, sticky="nsew")
+        self._stack.grid(row=4, column=0, sticky="nsew")
         self._stack.grid_columnconfigure(0, weight=1); self._stack.grid_rowconfigure(0, weight=1)
 
         # table view
@@ -9724,9 +9758,16 @@ class RawQCPage(ctk.CTkFrame):
         # figure view
         self._fig_wrap = tk.Frame(self._stack, bg=theme.CARD_BG)
         self._fig_wrap.grid_columnconfigure(0, weight=1); self._fig_wrap.grid_rowconfigure(0, weight=1)
-        self.fig = plt.Figure(figsize=(7, 6), dpi=100, facecolor=theme.CARD_BG)
+        self.fig = plt.Figure(figsize=(4, 3), dpi=100, facecolor=theme.CARD_BG, layout="constrained")
         self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_wrap)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        cw = self.canvas.get_tk_widget()
+        cw.configure(width=300, height=200)
+        cw.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.hover_lbl = tk.Label(self._fig_wrap, text="", bg=theme.CARD_BG, fg=theme.TEXT_PRIMARY,
+                                  font=(theme.FONT_FAMILY, 10), anchor="w", justify="left")
+        self.hover_lbl.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self._matrix_ax = None
 
         self._use_wrap.grid(row=0, column=0, sticky="nsew")
         return card
@@ -9876,6 +9917,7 @@ class RawQCPage(ctk.CTkFrame):
         if self._df is None:
             return
         v = self.view.get()
+        self.view_help.configure(text=self.VIEW_HELP[self.VIEWS.index(v)])
         for w in (self._use_wrap, self._tree_wrap, self._fig_wrap):
             w.grid_remove()
         if v == self.VIEWS[0]:
@@ -9887,12 +9929,17 @@ class RawQCPage(ctk.CTkFrame):
             self._fill_tree()
             return
         self._fig_wrap.grid(row=0, column=0, sticky="nsew")
-        self.fig.clear()
-        if v == self.VIEWS[2]:
-            self._plot_matrix()
-        else:
-            self._plot_series()
+        self.hover_lbl.configure(text="ชี้เมาส์ที่ช่องเพื่อดูค่าที่วัดได้" if v == self.VIEWS[2] else "")
+        self._draw_view(self.fig, v)
         self.canvas.draw_idle()
+
+    def _draw_view(self, fig, v):
+        fig.clear()
+        if v == self.VIEWS[2]:
+            self._matrix_ax = self._plot_matrix(fig)
+        else:
+            self._matrix_ax = None
+            self._plot_series(fig)
 
     def _fill_use_tree(self):
         self.use_tree.delete(*self.use_tree.get_children())
@@ -9931,44 +9978,103 @@ class RawQCPage(ctk.CTkFrame):
                                                 f"{r['n_pass']} / {r['n_warn']} / {r['n_fail']}", r["status"]),
                              tags=tags)
 
-    def _plot_matrix(self):
+    def _plot_matrix(self, fig):
         from matplotlib.colors import ListedColormap
-        D = self._df
+        from matplotlib.patches import Patch
+        from matplotlib.transforms import blended_transform_factory
+        D = self._df.sort_values("time").reset_index(drop=True)
+        self._matrix_df = D
         cols = _rq.VERDICT_COLS
-        labels = [lab for lab, _, _ in _rq.SCORED + _rq.CONTEXT]
         code = {"PASS": 0, "WARN": 1, "FAIL": 2, "NA": 3}
         M = np.array([[code.get(str(D.iloc[i][c]), 3) for c in cols] for i in range(len(D))])
-        ax = self.fig.add_subplot(111)
+        ax = fig.add_subplot(111)
         cmap = ListedColormap([self.VERDICT_COLORS[k] for k in ("PASS", "WARN", "FAIL", "NA")])
         ax.imshow(M, cmap=cmap, vmin=-0.5, vmax=3.5, aspect="auto", interpolation="nearest")
-        # the plot font has no ∥/⊥ glyphs: spell the channel out
-        labels = [lab.replace("∥", "par").replace("⊥", "perp") for lab in labels]
-        ax.set_xticks(range(len(cols))); ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+        # criterion names on top, where the eye starts
+        ax.xaxis.tick_top()
+        ax.set_xticks(range(len(cols)))
+        ax.set_xticklabels([self.MATRIX_COLS[c][0] for c in cols], fontsize=6.5, linespacing=0.95)
+        ax.tick_params(axis="x", length=0, pad=2)
         ylab = []
         for i in range(len(D)):
             t = pd.Timestamp(D.iloc[i]["time"])
             tag = "N" if D.iloc[i]["night"] else "D"
-            test = "  test" if D.iloc[i]["shots"] < _rq.CRITERIA["A1"]["min_shots"] else ""
+            test = " test" if D.iloc[i]["shots"] < _rq.CRITERIA["A1"]["min_shots"] else ""
             ylab.append(f"{t:%d/%m %H:%M} {tag}{test}" if pd.notna(t) else D.iloc[i]["file"])
-        ax.set_yticks(range(len(D))); ax.set_yticklabels(ylab, fontsize=7 if len(D) > 30 else 8)
+        ax.set_yticks(range(len(D)))
+        ax.set_yticklabels(ylab, fontsize=6.5 if len(D) > 30 else 7.5)
         ax.set_xticks(np.arange(-0.5, len(cols)), minor=True)
         ax.set_yticks(np.arange(-0.5, len(D)), minor=True)
-        ax.grid(which="minor", color=theme.CARD_BG, linewidth=1.2)
+        ax.grid(which="minor", color=theme.CARD_BG, linewidth=1.0)
         ax.tick_params(which="minor", length=0)
-        n_sc = len(_rq.SCORED)
-        ax.axvline(n_sc - 0.5, color=theme.TEXT_PRIMARY, linewidth=1.2)
-        for s in ax.spines.values():
-            s.set_visible(False)
-        from matplotlib.patches import Patch
-        ax.legend(handles=[Patch(color=self.VERDICT_COLORS[k], label=k) for k in ("PASS", "WARN", "FAIL", "NA")],
-                  loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4, fontsize=8)
-        ax.set_title("Each file against each criterion  (right of the line: not scored)", fontsize=10, pad=24)
-        self.fig.tight_layout()
+        # day/night boundaries
+        nights = D["night"].to_numpy(bool)
+        for i in range(1, len(D)):
+            if nights[i] != nights[i - 1]:
+                ax.axhline(i - 0.5, color=theme.TEXT_PRIMARY, linewidth=1.4)
+        # criterion groups above the names, separated by lines
+        trans = blended_transform_factory(ax.transData, ax.transAxes)
+        x0 = 0
+        for name, n in self.MATRIX_GROUPS:
+            ax.annotate(name, xy=((x0 + x0 + n - 1) / 2, 1.0), xycoords=trans, xytext=(0, 26),
+                        textcoords="offset points", ha="center", va="bottom", fontsize=7.5,
+                        fontweight="bold", color=theme.TEXT_PRIMARY, annotation_clip=False)
+            if x0:
+                ax.axvline(x0 - 0.5, color=theme.TEXT_PRIMARY,
+                           linewidth=2.0 if name.startswith("Info") else 0.8)
+            x0 += n
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+        fig.legend(handles=[Patch(color=self.VERDICT_COLORS["PASS"], label="PASS  meets the criterion"),
+                            Patch(color=self.VERDICT_COLORS["WARN"], label="WARN  close to the limit"),
+                            Patch(color=self.VERDICT_COLORS["FAIL"], label="FAIL  outside the limit"),
+                            Patch(color=self.VERDICT_COLORS["NA"], label="NA  not checked (night-only / test fire)")],
+                   loc="outside lower center", ncol=4, fontsize=7, frameon=False)
+        return ax
 
-    def _plot_series(self):
-        D = self._df[self._df["shots"] >= _rq.CRITERIA["A1"]["min_shots"]].copy()
+    def _on_hover(self, event):
+        ax = self._matrix_ax
+        if ax is None or event.inaxes is not ax or event.xdata is None:
+            return
+        j, i = int(round(event.xdata)), int(round(event.ydata))
+        D = getattr(self, "_matrix_df", None)
+        cols = _rq.VERDICT_COLS
+        if D is None or not (0 <= i < len(D) and 0 <= j < len(cols)):
+            return
+        c = cols[j]; r = D.iloc[i]
+        name, vcol, unit = self.MATRIX_COLS[c]
+        val = r.get(vcol)
+        if isinstance(val, (float, np.floating)):
+            val_txt = "–" if not np.isfinite(val) else f"{val:.3g} {unit}".strip()
+        else:
+            val_txt = f"{val} {unit}".strip() if val not in (None, "") else "–"
+        crit = _rq.CRITERIA[c[:2]]
+        rule = f"PASS {crit['pass_']} · FAIL {crit['fail']}"
+        t = pd.Timestamp(r["time"])
+        self.hover_lbl.configure(
+            text=f"{t:%d/%m %H:%M} ({'night' if r['night'] else 'day'}) · {c} {name.replace(chr(10), ' ')}: "
+                 f"{r[c]}  —  measured {val_txt}   [{rule}]")
+
+    def _open_large(self):
+        """The current figure view in its own resizable window with the matplotlib toolbar."""
+        if self._df is None or self.view.get() in self.VIEWS[:2]:
+            messagebox.showinfo("Open large", "Switch to 'Files × criteria' or 'Time series' first."); return
+        win = tk.Toplevel(self)
+        win.title(f"Raw QC — {self.view.get()}")
+        win.geometry("1400x900")
+        fig = plt.Figure(figsize=(14, 9), dpi=100, facecolor="white", layout="constrained")
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        NavigationToolbar2Tk(canvas, win).update()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._draw_view(fig, self.view.get())
+        self._matrix_ax = None   # hover stays with the embedded view
+        self.refresh()
+        canvas.draw()
+
+    def _plot_series(self, fig):
+        D = self._df[self._df["shots"] >= _rq.CRITERIA["A1"]["min_shots"]].sort_values("time").copy()
         t = pd.to_datetime(D["time"])
-        axs = self.fig.subplots(4, 1, sharex=True)
+        axs = fig.subplots(4, 1, sharex=True)
         night = D["night"].to_numpy(bool)
 
         def shade(ax):
@@ -10007,19 +10113,22 @@ class RawQCPage(ctk.CTkFrame):
         axs[3].grid(True, alpha=0.4)
         axs[3].legend(loc="upper left", fontsize=7, ncol=2)
         axs[0].legend(loc="upper left", fontsize=7, ncol=2)
-        axs[0].set_title("Acquisition quality over the day  (shaded = night)", fontsize=10)
+        axs[0].set_title("Acquisition quality over the day  (shaded = night, dashed = limit)", fontsize=9)
         import matplotlib.dates as mdates
         axs[3].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         for ax in axs:
             ax.tick_params(labelsize=7)
-        self.fig.tight_layout()
 
     def _save_png(self):
         if self._df is None or self.view.get() in self.VIEWS[:2]:
             messagebox.showinfo("Save PNG", "Switch to a figure view first."); return
         out = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png")])
         if out:
-            self.fig.savefig(out, dpi=200, facecolor="white")
+            # render at a fixed, readable size rather than whatever the card is now
+            fig = plt.Figure(figsize=(14, 9), dpi=150, facecolor="white", layout="constrained")
+            self._draw_view(fig, self.view.get())
+            self.refresh()
+            fig.savefig(out, dpi=150, facecolor="white")
             self._log(f"[OK] Saved {out}")
 
 
