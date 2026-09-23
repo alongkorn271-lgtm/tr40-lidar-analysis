@@ -54,6 +54,16 @@ AUTO_FC_CYCLES_PER_M = 0.010
 AUTO_TOL_M = 90.0
 AUTO_RMIN_M = 300.0
 AUTO_RMAX_M = 4000.0
+# Which falling edge to report when several qualify. SigmaMPL's own PBL detection has a
+# height limit, a maximum layer thickness and a "multilayer limit" (secondary/main peak
+# ratio) — manual p. 25. Tested on the five nights: the multilayer limit only decides
+# which edges count as candidates, and the thickness rule never changed the answer
+# (the strongest edge passes it anyway), so what is left is the choice between
+# candidates. Following the previous profile (the layer moves slowly) does help:
+# 209 m -> 171 m median against the MPL PBL, 78 % of profiles within 400 m.
+AUTO_MULTILAYER_LIMIT = 0.30    # keep edges at least this fraction of the strongest
+AUTO_CONTINUITY = 1.0           # cost per km of jump from the previous profile (0 = off)
+AUTO_MAX_THICKNESS_M = 0.0      # 0 = off; layer measured from the rising edge below
 
 # New defaults for "incomplete NRB" detection
 MIN_VALID_FRAC_DEFAULT = 0.50  # if < 50% finite bins -> treat as incomplete
@@ -465,6 +475,48 @@ def fft_lowpass_fixed_fc(
     ypad = np.fft.irfft(X * H, n=n)
     y = ypad[pad: pad + n0]
     return np.asarray(y, float)
+
+
+def falling_edges(W: np.ndarray, r_m: np.ndarray, rmin: float, rmax: float,
+                  multilayer_limit: float = AUTO_MULTILAYER_LIMIT,
+                  max_thickness_m: float = 0.0) -> List[Tuple[float, float]]:
+    """Candidate layer tops in [rmin, rmax]: local minima of W (falling edges) that reach
+    ``multilayer_limit`` x the strongest one, lowest first. With ``max_thickness_m`` an
+    edge is dropped when the rising edge below it is further away than that."""
+    m = np.isfinite(W) & (r_m >= float(rmin)) & (r_m <= float(rmax))
+    if int(m.sum()) < 3:
+        return []
+    Wm, rm = np.asarray(W)[m], np.asarray(r_m)[m]
+    tops, bases = [], []
+    for i in range(1, Wm.size - 1):
+        if Wm[i] <= Wm[i - 1] and Wm[i] <= Wm[i + 1] and Wm[i] < 0:
+            tops.append((float(rm[i]), float(Wm[i])))
+        elif Wm[i] >= Wm[i - 1] and Wm[i] >= Wm[i + 1] and Wm[i] > 0:
+            bases.append(float(rm[i]))
+    if not tops:
+        return []
+    strongest = min(w for _, w in tops)
+    keep = [(h, w) for h, w in tops if w <= float(multilayer_limit) * strongest]
+    if max_thickness_m and np.isfinite(max_thickness_m) and max_thickness_m > 0:
+        thin = []
+        for h, w in keep:
+            below = [b for b in bases if b < h]
+            if (h - (below[-1] if below else float(rmin))) <= float(max_thickness_m):
+                thin.append((h, w))
+        keep = thin or keep      # the thickness rule never removes the last candidate
+    return keep
+
+
+def pick_edge(cands: List[Tuple[float, float]], prev_m: float, continuity: float) -> float:
+    """The strongest candidate, or — with continuity on and a previous answer — the one
+    whose strength minus the jump from that answer scores best."""
+    if not cands:
+        return float("nan")
+    strongest = min(w for _, w in cands)
+    if not (continuity and np.isfinite(prev_m)):
+        return float(min(cands, key=lambda z: z[1])[0])
+    return float(min(cands, key=lambda z: (z[1] / strongest) * -1.0
+                     + float(continuity) * abs(z[0] - float(prev_m)) / 1000.0)[0])
 
 
 def hwct_haar_step_right_minus_left(x: np.ndarray, half_bins: int) -> np.ndarray:
@@ -1042,6 +1094,12 @@ def main():
     # covariance of NRB; SigmaMPL's PBL comes from its own wavelet settings (manual
     # p. 25), so their numbers answer different questions. Running OUR detector on the
     # MPL's own NRB gives the like-for-like number, with their PBL kept as a reference.
+    ap.add_argument("--auto_multilayer_limit", type=float, default=AUTO_MULTILAYER_LIMIT,
+                    help="auto_no_mpl: keep edges at least this fraction of the strongest")
+    ap.add_argument("--auto_continuity", type=float, default=AUTO_CONTINUITY,
+                    help="auto_no_mpl: cost per km of jump from the previous profile (0 = off)")
+    ap.add_argument("--auto_max_thickness", type=float, default=AUTO_MAX_THICKNESS_M,
+                    help="auto_no_mpl: maximum layer thickness [m] (0 = off)")
     ap.add_argument("--mpl_nrb", default="",
                     help="Excel with the MPL NRB (same detector run on it for comparison)")
     ap.add_argument("--mpl_nrb_sheet", default="copol_nrb_norm",
@@ -1224,6 +1282,7 @@ def main():
 
     results_rows = []
     cloud_rows = []  # per-cloud-layer rows for Cloud_results sheet
+    prev_auto_alt = np.nan   # auto_no_mpl: last accepted layer top, for continuity
     for j, t_profile in enumerate(profile_times):
         t_profile = pd.Timestamp(t_profile)
         slot = t_profile.strftime("%H:%M")
@@ -1392,6 +1451,34 @@ def main():
                         pass  # keep original result if anything goes wrong
             else:
                 profile_res = _empty_profile_result("profile_window_invalid", r_m, ycol, dr_global)
+
+            # ── auto_no_mpl: choose among the candidate falling edges, following the
+            #    previous profile unless a clearly stronger edge appears ──────────
+            if auto_mode and profile_res.get("Analysis_status") == "ok":
+                try:
+                    prep_a = prepare_profile_for_fft(r_m, ycol)
+                    if prep_a["status"] == "ok" and int(prep_a["analysis_bins_used"]) >= 8:
+                        r_a = np.asarray(prep_a["r_use"], float)
+                        y_a = np.asarray(prep_a["y_use"], float)
+                        dr_a = float(np.nanmedian(np.diff(r_a)))
+                        y_dn_a = fft_lowpass_fixed_fc(y_a, dr=dr_a, fc=prof_fc,
+                                                      order=args.order, pad_frac=args.pad_frac)
+                        W_a = hwct_haar_step_right_minus_left(
+                            y_dn_a, int(max(1, round(float(prof_tol) / dr_a))))
+                        cands = falling_edges(W_a, r_a, prof_rmin, prof_rmax,
+                                              multilayer_limit=float(args.auto_multilayer_limit),
+                                              max_thickness_m=float(args.auto_max_thickness))
+                        h = pick_edge(cands, prev_auto_alt, float(args.auto_continuity))
+                        if np.isfinite(h):
+                            profile_res["PBL_TR40_m"] = h
+                            profile_res["PBL_neg_m"] = h
+                            profile_res["Chosen_mode"] = ("auto_continuity"
+                                                          if (args.auto_continuity and np.isfinite(prev_auto_alt))
+                                                          else "auto_strongest")
+                            profile_res["ALT_candidates_n"] = len(cands)
+                            prev_auto_alt = h
+                except Exception:
+                    pass   # keep the plain strongest-edge answer
 
             # Annotate which window was used for this profile (for QC sheet)
             profile_res["window_source"] = window_source
