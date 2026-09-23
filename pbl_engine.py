@@ -1038,6 +1038,14 @@ def main():
                     help="auto_no_mpl: bottom of the search range [m]")
     ap.add_argument("--auto_rmax", type=float, default=AUTO_RMAX_M,
                     help="auto_no_mpl: top of the search range [m]")
+    # Same-method comparison: our ALT is an aerosol-layer top from the Haar wavelet
+    # covariance of NRB; SigmaMPL's PBL comes from its own wavelet settings (manual
+    # p. 25), so their numbers answer different questions. Running OUR detector on the
+    # MPL's own NRB gives the like-for-like number, with their PBL kept as a reference.
+    ap.add_argument("--mpl_nrb", default="",
+                    help="Excel with the MPL NRB (same detector run on it for comparison)")
+    ap.add_argument("--mpl_nrb_sheet", default="copol_nrb_norm",
+                    help="sheet holding the MPL NRB (Range(m) + HH:MM columns)")
     ap.add_argument("--profile_rmin", type=float, default=0.0,
                     help="Lower range limit for independent NRB-profile ALT mode")
     ap.add_argument("--profile_rmax", type=float, default=4000.0,
@@ -1134,6 +1142,21 @@ def main():
         df_rr["PBL from MPL (m)"] = np.nan
         df_rr["rmin"] = np.nan
         df_rr["rmax"] = np.nan
+
+    # Same-method comparison data: the MPL's own NRB on its own range grid
+    mpl_r = None
+    mpl_by_slot: Dict[str, np.ndarray] = {}
+    if str(args.mpl_nrb).strip():
+        try:
+            mpl_r, mpl_times, mpl_mat, mpl_cols = read_nrb_wide_excel(Path(args.mpl_nrb), sheet=args.mpl_nrb_sheet)
+            for j, c in enumerate(mpl_cols):
+                t = pd.to_datetime(c, errors="coerce")
+                slot = t.strftime("%H:%M") if pd.notna(t) else str(c)[:5]
+                mpl_by_slot[slot] = mpl_mat[:, j]
+            print(f"[same-method] loaded {len(mpl_by_slot)} MPL NRB profile(s) from '{args.mpl_nrb_sheet}'")
+        except Exception as e:
+            print(f"[same-method] MPL NRB not loaded: {e}")
+            mpl_r, mpl_by_slot = None, {}
 
     # Prepare mapping by slot (HH:MM)
     rr_map = df_rr.set_index("Slot") if "Slot" in df_rr.columns else pd.DataFrame().set_index(pd.Index([]))
@@ -1418,6 +1441,32 @@ def main():
 
         alt_tr40 = selected_res["PBL_TR40_m"]
 
+        # ── Same-method ALT on the MPL's NRB (only differs by the instrument) ──
+        alt_mpl_same = np.nan
+        if mpl_r is not None:
+            y_mpl = mpl_by_slot.get(slot)
+            # the MPL NRB sheet carries HH:MM only, so a slot can belong to the day
+            # before: trust it only when the rmin-rmax table (which keeps full dates)
+            # puts that slot within 6 h of this profile
+            # the MPL NRB sheet carries HH:MM only, so the same slot can belong to another
+            # day; only trust it where this slot really has MPL data (a window or a PBL)
+            if not (_valid_window(rmin, rmax) or np.isfinite(alt_mpl)):
+                y_mpl = None
+            if y_mpl is not None and np.any(np.isfinite(y_mpl)):
+                same_fc = float(args.auto_fc) if auto_mode else float(args.fc)
+                same_tol = float(args.auto_tol_m) if auto_mode else float(args.tol_m)
+                if selected_label.endswith("mpl_guided") and _valid_window(rmin, rmax):
+                    lo, hi = rmin, rmax
+                else:
+                    lo, hi = prof_rmin, prof_rmax
+                if _valid_window(lo, hi):
+                    same = compute_pbl_for_profile(
+                        r_m=mpl_r, y_raw=y_mpl, rmin=lo, rmax=hi,
+                        fc=same_fc, order=args.order, pad_frac=args.pad_frac,
+                        smooth_win=args.smooth_win, tol_m=same_tol,
+                    )
+                    alt_mpl_same = same.get("PBL_TR40_m", np.nan)
+
         # ── δ-at-ALT QC flag: classify the SELECTED (reported) ALT edge as
         #    cloud / aerosol so a (low-δ) water cloud or (high-δ) ice cloud
         #    mistaken for the layer top is visible. Computed at alt_tr40 (the
@@ -1447,6 +1496,10 @@ def main():
                 "Time_mapping": time_mapping,
                 "Detection_mode": args.detection_mode,
                 "ALT_selected_source": selected_label,
+                # like-for-like: our detector on the MPL's NRB, and their own product
+                "ALT_same_method_MPL_m": float(alt_mpl_same) if np.isfinite(alt_mpl_same) else np.nan,
+                "Delta_ALT_ours_minus_MPLdata_m": (float(alt_tr40 - alt_mpl_same)
+                                                   if np.isfinite(alt_tr40) and np.isfinite(alt_mpl_same) else np.nan),
                 "Status": status,
                 "NRB_valid_frac": valid_frac,
                 "NRB_valid_bins": valid_bins,

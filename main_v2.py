@@ -2436,6 +2436,8 @@ class Step3Page(ctk.CTkFrame):
         self.cloud_max_layers = tk.StringVar(value="3")
         # SNR-trusted-range cap: keep the ALT search out of the noise floor.
         # Reads the "SNR" sheet from the NRB workbook (Depol/Step-2 output).
+        # run the same ALT detector on the MPL's own NRB (like-for-like comparison)
+        self.same_method_mpl = tk.BooleanVar(value=True)
         self.snr_cap = tk.BooleanVar(value=True)
         self.snr_cap_min = tk.StringVar(value="3.0")
         # ── Track 2 — Depolarization aid (from Step 6) ──────────────────────
@@ -2753,6 +2755,28 @@ class Step3Page(ctk.CTkFrame):
         ctk.CTkEntry(dp_row2, textvariable=self.depol_confirm_tol, width=60,
                      **theme.input_style()).pack(side="left", padx=(8, 4))
 
+        # ── Same-method comparison against the MPL ─────────────────────────
+        ctk.CTkLabel(
+            body, text="COMPARISON — run this same detector on the MPL's own NRB",
+            font=(theme.FONT_FAMILY, 10, "bold"),
+            text_color=theme.TEXT_MUTED, anchor="w",
+        ).grid(row=14, column=0, sticky="ew", pady=(12, 4))
+        sm_row = ctk.CTkFrame(body, fg_color="transparent")
+        sm_row.grid(row=15, column=0, sticky="ew", pady=(0, 2))
+        _add_cb(sm_row, "Also compute ALT from the MPL NRB with the same settings (like-for-like)",
+                self.same_method_mpl, side="left")
+        ctk.CTkLabel(
+            body,
+            text="Our ALT is the aerosol-layer top from the Haar wavelet covariance of NRB; "
+                 "SigmaMPL's PBL uses its own wavelet settings (SigmaMPL manual p. 25), so the two "
+                 "answer different questions and differ by ~90 m at night. Running our detector on "
+                 "the MPL's NRB isolates the instrument from the algorithm. Adds the columns "
+                 "ALT_same_method_MPL_m and Delta_ALT_ours_minus_MPLdata_m; uses the MPL workbook "
+                 "chosen above (sheet copol_nrb_norm).",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=15, column=0, sticky="ew", pady=(22, 0))
+
         # ── Signal quality (SNR-trusted-range cap) ─────────────────────────
         ctk.CTkLabel(
             body, text="SIGNAL QUALITY — keep the ALT search out of the noise floor",
@@ -2957,6 +2981,8 @@ class Step3Page(ctk.CTkFrame):
                     "--rminrmax_sheet", PREF_RMIN_SHEET, "--out", out,
                     "--min_valid_frac", str(mvf), "--min_valid_bins", str(mvb),
                     "--detection_mode", det_mode,
+                    *(["--mpl_nrb", rmin, "--mpl_nrb_sheet", "copol_nrb_norm"]
+                      if bool(self.same_method_mpl.get()) and rmin and os.path.exists(rmin) else []),
                     "--profile_rmin", str(prmin), "--profile_rmax", str(prmax),
                     "--tol_m", str(tol_m_val),
                 ]
