@@ -2401,7 +2401,10 @@ class Step2Page(ctk.CTkFrame):
 # ═════════════════════════════════════════════════════════════════════════════
 # Step 3 Page  –  ALT Calculator
 # ═════════════════════════════════════════════════════════════════════════════
-DETECTION_MODES = ["dual", "mpl_guided", "nrb_profile"]
+# auto_no_mpl needs no MPL window at all (its own low-pass + Haar window, 300-4000 m);
+# median |ALT - MPL PBL| 209 m against 90 m for the MPL-guided modes, so it is the
+# fallback for slots the MPL does not cover.
+DETECTION_MODES = ["dual", "mpl_guided", "nrb_profile", "auto_no_mpl"]
 
 
 class Step3Page(ctk.CTkFrame):
@@ -9547,7 +9550,8 @@ class RawQCPage(ctk.CTkFrame):
         self.preset = tk.StringVar(value=next(iter(self.PRESETS)))
         self.plan_shots = tk.StringVar(value="2400")
         self.plan_bin = tk.StringVar(value="3.75")
-        self.plan_hv = tk.StringVar(value="750")
+        self.plan_hv = tk.StringVar(value="750")        # parallel (PMT 1 / TR0)
+        self.plan_hv_perp = tk.StringVar(value="750")   # perpendicular (PMT 2 / TR1)
         self.plan_alt = tk.StringVar(value="15")
         self.out_path = tk.StringVar()
         self.view = tk.StringVar(value=self.VIEWS[0])
@@ -9622,7 +9626,8 @@ class RawQCPage(ctk.CTkFrame):
         ).grid(row=3, column=0, sticky="w", pady=(2, 8))
         grid = ctk.CTkFrame(body, fg_color="transparent"); grid.grid(row=4, column=0, sticky="ew")
         for j, (lab, var) in enumerate([("Case name", self.case_name), ("Shots", self.plan_shots),
-                                        ("Bin (m)", self.plan_bin), ("HV (V)", self.plan_hv),
+                                        ("Bin (m)", self.plan_bin), ("HV ∥ (V)", self.plan_hv),
+                                        ("HV ⊥ (V)", self.plan_hv_perp),
                                         ("Altitude (km)", self.plan_alt)]):
             grid.grid_columnconfigure(j, weight=1)
             FieldRow(grid, lab, var, width=70).grid(row=0, column=j, sticky="ew", padx=(0, 6))
@@ -9783,7 +9788,7 @@ class RawQCPage(ctk.CTkFrame):
             return
         shots, bin_m, hv, alt = p
         self.plan_shots.set(str(shots)); self.plan_bin.set(f"{bin_m:g}")
-        self.plan_hv.set(str(hv)); self.plan_alt.set(f"{alt:g}")
+        self.plan_hv.set(str(hv)); self.plan_hv_perp.set(str(hv)); self.plan_alt.set(f"{alt:g}")
         self.case_name.set(name.split(" · ")[0].replace("Case ", "C"))
 
     def _pick_folder(self):
@@ -9813,7 +9818,8 @@ class RawQCPage(ctk.CTkFrame):
             messagebox.showerror("Error", "Choose the raw data folder."); return
         try:
             plan = dict(shots=int(float(self.plan_shots.get())), bin_m=float(self.plan_bin.get()),
-                        hv=int(float(self.plan_hv.get())), altitude_km=float(self.plan_alt.get()))
+                        hv_par=int(float(self.plan_hv.get())), hv_perp=int(float(self.plan_hv_perp.get())),
+                        altitude_km=float(self.plan_alt.get()))
         except Exception:
             messagebox.showerror("Error", "Plan values must be numbers."); return
         name = self.case_name.get().strip() or "Case"
@@ -9823,8 +9829,8 @@ class RawQCPage(ctk.CTkFrame):
         self.pb.configure(mode="indeterminate"); self.pb.start()
         self.status.set("Reading raw files…", "running")
         self._log(f"=== START Raw QC · {folder} ===")
-        self._log(f"plan: {plan['shots']} shots · {plan['bin_m']:g} m · HV {plan['hv']} V · "
-                  f"{plan['altitude_km']:g} km")
+        self._log(f"plan: {plan['shots']} shots · {plan['bin_m']:g} m · HV ∥ {plan['hv_par']} / "
+                  f"⊥ {plan['hv_perp']} V · {plan['altitude_km']:g} km")
 
         def worker():
             try:
@@ -9838,7 +9844,8 @@ class RawQCPage(ctk.CTkFrame):
                 sc = _rq.score(summ)
                 try:
                     _rqs.write_case_workbook(D, Path(out), name=name, folder=folder, plan=plan, date=date,
-                                             condition=f"{name} · {plan['bin_m']:g} m · {plan['shots']} shot · HV {plan['hv']} V")
+                                             condition=(f"{name} · {plan['bin_m']:g} m · {plan['shots']} shot · "
+                                                        f"HV ∥ {plan['hv_par']} / ⊥ {plan['hv_perp']} V"))
                     self._safe_log(f"[OK] Check sheet: {Path(out).resolve()}")
                 except PermissionError:
                     self._safe_log(f"[WARN] {out} is open in Excel — close it and run again to save the sheet.")
@@ -9890,6 +9897,12 @@ class RawQCPage(ctk.CTkFrame):
         if common:
             banner += "\nข้อจำกัดของทั้งวัน: " + "; ".join(common)
         okf = D[D["shots"] >= _rq.CRITERIA["A1"]["min_shots"]]
+        if "hv_off_calibration" in D and bool(D["hv_off_calibration"].any()):
+            hv = sorted({(int(a), int(b)) for a, b in zip(D["par_hv"], D["perp_hv"])})
+            self._log(f"[!] HV ต่างจาก {_rq.CALIBRATED_HV} V ที่ใช้คาลิเบรตค่าคงที่ไว้: "
+                      + ", ".join(f"∥ {a} / ⊥ {b}" for a, b in hv)
+                      + " — glue gain สำรอง (87/96) และ dead time (4.7/5.0 ns) ใช้กับไฟล์เหล่านี้ไม่ได้ "
+                        "ต้องให้ Step 3 วัด gain เองจากช่วง glue ของคืนนั้น")
         if len(okf) and (okf["A2"] == "FAIL").all():
             # every file disagrees with the plan: almost always the wrong preset
             bins = sorted(okf["bin_m"].unique())

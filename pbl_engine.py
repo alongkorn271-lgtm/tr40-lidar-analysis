@@ -45,6 +45,16 @@ FFT_PAD_FRAC = 0.10
 SMOOTH_WIN_BINS = 7
 HWCT_TOL_M = 22.5  # ±22.5 m half-window
 
+# "auto_no_mpl": ALT without any MPL window. Tuned on the five nights we have against the
+# MPL PBL product (08, 09, 14, 15, 22-23 Sep 2026, 41 night profiles): a heavier low-pass
+# and a wider Haar window than the MPL-guided defaults, searching 300-4000 m and taking
+# the strongest falling edge. Median |ALT - MPL PBL| = 209 m (the MPL-guided mode reaches
+# 90 m), so this is the fallback for slots the MPL does not cover, not a replacement.
+AUTO_FC_CYCLES_PER_M = 0.010
+AUTO_TOL_M = 90.0
+AUTO_RMIN_M = 300.0
+AUTO_RMAX_M = 4000.0
+
 # New defaults for "incomplete NRB" detection
 MIN_VALID_FRAC_DEFAULT = 0.50  # if < 50% finite bins -> treat as incomplete
 MIN_VALID_BINS_DEFAULT = 50    # guard for very short / broken columns
@@ -1011,14 +1021,23 @@ def main():
 
     ap.add_argument(
         "--detection_mode",
-        choices=["mpl_guided", "nrb_profile", "dual"],
+        choices=["mpl_guided", "nrb_profile", "dual", "auto_no_mpl"],
         default="dual",
         help=(
             "mpl_guided = search only inside MPL-derived rmin/rmax; "
             "nrb_profile = search inside fixed NRB profile range; "
-            "dual = calculate both and use MPL-guided as selected result if available"
+            "dual = calculate both and use MPL-guided as selected result if available; "
+            "auto_no_mpl = no MPL at all: own low-pass/Haar window over a fixed range"
         ),
     )
+    ap.add_argument("--auto_fc", type=float, default=AUTO_FC_CYCLES_PER_M,
+                    help="auto_no_mpl: FFT cutoff [cycles/m]")
+    ap.add_argument("--auto_tol_m", type=float, default=AUTO_TOL_M,
+                    help="auto_no_mpl: Haar half-window [m]")
+    ap.add_argument("--auto_rmin", type=float, default=AUTO_RMIN_M,
+                    help="auto_no_mpl: bottom of the search range [m]")
+    ap.add_argument("--auto_rmax", type=float, default=AUTO_RMAX_M,
+                    help="auto_no_mpl: top of the search range [m]")
     ap.add_argument("--profile_rmin", type=float, default=0.0,
                     help="Lower range limit for independent NRB-profile ALT mode")
     ap.add_argument("--profile_rmax", type=float, default=4000.0,
@@ -1229,9 +1248,21 @@ def main():
             #   1. Adaptive diurnal window (overrides base if enabled)
             #   2. Peak-anchored narrowing (refines around NRB peak)
             #   3. Cloud screening (marks profile as cloudy and skips HWCT)
-            prof_rmin = float(args.profile_rmin)
-            prof_rmax = float(args.profile_rmax)
-            window_source = "fixed_user"
+            # dual mode with no MPL window for this slot: the fixed 0-4000 m window with
+            # the MPL-guided low-pass finds the wrong edge (median 500 m against the MPL
+            # PBL), so fall back to the auto_no_mpl settings (209 m) instead.
+            auto_mode = (args.detection_mode == "auto_no_mpl"
+                         or (args.detection_mode == "dual"
+                             and not np.isfinite(guided_res.get("PBL_TR40_m", np.nan))))
+            prof_fc = float(args.auto_fc) if auto_mode else float(args.fc)
+            prof_tol = float(args.auto_tol_m) if auto_mode else float(args.tol_m)
+            if auto_mode:
+                prof_rmin, prof_rmax = float(args.auto_rmin), float(args.auto_rmax)
+                window_source = "auto_no_mpl"
+            else:
+                prof_rmin = float(args.profile_rmin)
+                prof_rmax = float(args.profile_rmax)
+                window_source = "fixed_user"
 
             if args.adaptive_window:
                 ad_rmin, ad_rmax = adaptive_window_for_hour(int(t_profile.hour))
@@ -1303,11 +1334,11 @@ def main():
                     y_raw=ycol,
                     rmin=prof_rmin,
                     rmax=prof_rmax,
-                    fc=args.fc,
+                    fc=prof_fc,
                     order=args.order,
                     pad_frac=args.pad_frac,
                     smooth_win=args.smooth_win,
-                    tol_m=args.tol_m,
+                    tol_m=prof_tol,
                 )
 
                 # ── Track A: lowest-stable edge re-selection (optional) ──
@@ -1321,10 +1352,10 @@ def main():
                             y_use = np.asarray(prep["y_use"], float)
                             dr_use = float(np.nanmedian(np.diff(r_use)))
                             y_dn = fft_lowpass_fixed_fc(
-                                y_use, dr=dr_use, fc=args.fc,
+                                y_use, dr=dr_use, fc=prof_fc,
                                 order=args.order, pad_frac=args.pad_frac,
                             )
-                            half_bins = int(max(1, round(float(args.tol_m) / dr_use)))
+                            half_bins = int(max(1, round(float(prof_tol) / dr_use)))
                             W = hwct_haar_step_right_minus_left(y_dn, half_bins)
                             r_alt_new, w_new, mode_new = select_lowest_stable_edge(
                                 W, r_use, prof_rmin, prof_rmax,
@@ -1368,7 +1399,10 @@ def main():
         guided_alt = guided_res["PBL_TR40_m"]
         profile_alt = profile_res["PBL_TR40_m"]
 
-        if args.detection_mode == "mpl_guided":
+        if args.detection_mode == "auto_no_mpl":
+            selected_label = "auto_no_mpl"
+            selected_res = profile_res
+        elif args.detection_mode == "mpl_guided":
             selected_label = "mpl_guided"
             selected_res = guided_res
         elif args.detection_mode == "nrb_profile":
