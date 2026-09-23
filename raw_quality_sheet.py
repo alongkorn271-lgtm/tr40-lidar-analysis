@@ -370,7 +370,10 @@ def build_case_sheet(wb: Workbook, title: str, meta: Dict, D: Optional[pd.DataFr
     hdr(2, 16, "Date:"); hdr(2, 17, meta.get("date", ""), bold=False, span=4)
     hdr(3, 1, "Plan shots"); c = ws.cell(row=3, column=5, value=meta.get("shots")); _style(c, fill=INPUT_FILL)
     hdr(3, 6, "Bin (m)"); c = ws.cell(row=3, column=8, value=meta.get("bin_m")); _style(c, fill=INPUT_FILL)
-    hdr(3, 9, "HV (V)"); c = ws.cell(row=3, column=10, value=meta.get("hv", 750)); _style(c, fill=INPUT_FILL)
+    hdr(3, 9, "HV ∥/⊥ (V)")
+    c = ws.cell(row=3, column=10, value=f"{meta.get('hv_par', meta.get('hv', 750))} / "
+                                       f"{meta.get('hv_perp', meta.get('hv', 750))}")
+    _style(c, fill=INPUT_FILL)
     hdr(3, 11, "Altitude (km)"); c = ws.cell(row=3, column=13, value=meta.get("altitude_km")); _style(c, fill=INPUT_FILL)
     hdr(3, 14, "Dark offset ∥/⊥ (mV)"); hdr(3, 17, meta.get("dark", ""), bold=False, span=4)
     hdr(4, 1, "Raw folder"); hdr(4, 3, meta.get("folder", ""), bold=False, span=18)

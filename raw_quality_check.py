@@ -68,6 +68,11 @@ CRITERIA = {
                pass_="none", warn="cloud (weather, not a fault)", fail="-", max_base=3000.0),
 }
 
+# The instrument constants below (glue gain, dead time, C) were all measured at this HV.
+# A file recorded at another HV needs its own gain — the pipeline measures one per night
+# when a glue window exists, but its fixed fallback would be wrong.
+CALIBRATED_HV = 750
+
 # Night gain measured per bin width (robust glue, 08/14/15 Sep at 3.75 m, 09 Sep at 30 m)
 REF_GAIN = {3.75: {"par": 87.0, "perp": 96.0}, 30.0: {"par": 90.0, "perp": 97.0}}
 NIGHT_HOURS = (19.0, 5.5)   # local clock: after astronomical twilight, before dawn (Chiang Mai, Sep)
@@ -250,8 +255,11 @@ def check_folder(folder: Path, *, plan: Optional[Dict] = None) -> pd.DataFrame:
     # a reference needs a few clean nights' files, otherwise every file is compared with itself
     ref_ratio = float(night.loc[snr_ok, "ratio_5km"].median()) if snr_ok.sum() >= MIN_RATIO_FILES else np.nan
     D["ratio_ref"] = ref_ratio
+    D["hv_off_calibration"] = (D["par_hv"] != CALIBRATED_HV) | (D["perp_hv"] != CALIBRATED_HV)
 
-    plan_shots = plan.get("shots"); plan_bin = plan.get("bin_m"); plan_hv = plan.get("hv")
+    plan_shots = plan.get("shots"); plan_bin = plan.get("bin_m")
+    # HV may differ per channel (e.g. a lower parallel to keep its analog in range)
+    plan_hv = {"par": plan.get("hv_par", plan.get("hv")), "perp": plan.get("hv_perp", plan.get("hv"))}
     plan_alt = plan.get("altitude_km"); plan_disc = plan.get("disc_mv", 3.1746); plan_rng = plan.get("range_mv", 500.0)
     V = {}
     for i, row in D.iterrows():
@@ -262,7 +270,7 @@ def check_folder(folder: Path, *, plan: Optional[Dict] = None) -> pd.DataFrame:
                    else "WARN" if row.shots >= c["min_shots"] else "FAIL")
         diffs = []
         for ch in ("par", "perp"):
-            if plan_hv and row[f"{ch}_hv"] != plan_hv:
+            if plan_hv[ch] and row[f"{ch}_hv"] != plan_hv[ch]:
                 diffs.append(f"{ch} HV {row[f'{ch}_hv']}")
             if abs(row[f"{ch}_disc_mv"] - plan_disc) > 0.01:
                 diffs.append(f"{ch} disc {row[f'{ch}_disc_mv']}")
@@ -272,8 +280,10 @@ def check_folder(folder: Path, *, plan: Optional[Dict] = None) -> pd.DataFrame:
             diffs.append(f"bin {row.bin_m:g} m")
         if plan_alt and row.par_bins * row.bin_m < 0.99 * plan_alt * 1000 - ne.PRETRIGGER_TRACE_DISTANCE_M:
             diffs.append(f"alt {row.par_bins * row.bin_m / 1000:.1f} km")
-        if row.par_hv != row.perp_hv or row.par_bins != row.perp_bins:
-            diffs.append("∥≠⊥")
+        if row.par_bins != row.perp_bins:
+            diffs.append("∥≠⊥ bins")
+        if row.par_hv != row.perp_hv and plan_hv["par"] == plan_hv["perp"]:
+            diffs.append("∥≠⊥ HV")
         v["A2"] = "FAIL" if diffs else "PASS"
         D.loc[i, "A2_note"] = "; ".join(diffs)
         for ch in ("par", "perp"):
