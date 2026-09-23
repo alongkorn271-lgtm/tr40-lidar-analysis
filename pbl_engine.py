@@ -1053,6 +1053,35 @@ def compute_depol_alt(r_m, delta, rmin, rmax, fc, order, pad_frac, tol_m):
     return float(r_win[int(np.nanargmin(W_win))])
 
 
+def _definitions_sheet(args) -> pd.DataFrame:
+    """What each reported height means — ours and the MPL's are different products."""
+    rows = [
+        ("ALT_TR40_m", "ของเรา (TR40)",
+         "Aerosol Layer Top — ยอดชั้นละอองลอย: ความสูงที่ NRB ลดลงแรงที่สุด หาจากยอดลบของ "
+         "Haar wavelet covariance (HWCT) บน NRB ที่กรองด้วย FFT low-pass แล้ว",
+         f"fc={args.fc} cycles/m, Haar half-window={args.tol_m} m, mode={args.detection_mode}",
+         "m AGL", "ผลิตภัณฑ์หลักของโครงการ ใช้รายงานและเขียน paper"),
+        ("PBL_TR40_m", "ของเรา (ชื่อเดิม)", "ค่าเดียวกับ ALT_TR40_m ทุกประการ เก็บไว้เพื่อไม่ให้ไฟล์เก่าพัง",
+         "-", "m AGL", "อย่าใช้ชื่อนี้ในรายงานใหม่ — คำว่า PBL สงวนไว้เรียกผลิตภัณฑ์ของ MPL"),
+        ("PBL_MPL_m", "ของ Mini-MPL",
+         "Planetary Boundary Layer height ที่ SigmaMPL คำนวณเอง (wavelet + PBL Height Limit + "
+         "Max PBL Thickness + Multilayer Limit — คู่มือ SigmaMPL หน้า 25) อ่านจากตัวแปร pbls ในไฟล์ .nc",
+         "ค่าพารามิเตอร์ของเขาไม่เปิดเผยในไฟล์", "m AGL",
+         "ใช้เป็นข้อมูลอ้างอิงและเป็นหน้าต่างค้นหา (rmin/rmax = PBL ± 300 m) ไม่ใช่ค่าที่เราต้องไล่ตาม"),
+        ("ALT_same_method_MPL_m", "ข้อมูลของ MPL + วิธีของเรา",
+         "รัน ALT ของเราบน NRB ของ MPL เอง ด้วยค่าตั้งและหน้าต่างชุดเดียวกับข้อมูลเรา",
+         "เหมือนแถวแรก", "m AGL",
+         "ใช้แยกความต่างของเครื่องออกจากความต่างของอัลกอริทึม"),
+        ("Delta_ALT_ours_minus_MPLdata_m", "ส่วนต่าง",
+         "ALT_TR40_m − ALT_same_method_MPL_m", "-", "m",
+         "อัลกอริทึมเดียวกัน จึงเหลือเฉพาะความต่างของเครื่อง (คืน 22–23 ก.ย. 2569: 99 m)"),
+        ("Delta_ALT_selected_minus_MPL_m", "ส่วนต่าง",
+         "ALT_TR40_m − PBL_MPL_m", "-", "m",
+         "ปนทั้งความต่างของเครื่องและของอัลกอริทึม (คืน 22–23 ก.ย. 2569: 72 m)"),
+    ]
+    return pd.DataFrame(rows, columns=["คอลัมน์", "มาจาก", "นิยาม", "ค่าตั้งที่ใช้", "หน่วย", "หมายเหตุ"])
+
+
 def main():
     ap = argparse.ArgumentParser(description="ALT report-style (Excel inputs + multi-sheet outputs).")
     ap.add_argument("--nrb", required=True, help="NRB Excel file path")
@@ -1797,6 +1826,7 @@ def main():
         if args.cloud_detect:
             df_clouds.to_excel(xw, index=False, sheet_name="Cloud_results")
         params.to_excel(xw, index=False, sheet_name="Parameters")
+        _definitions_sheet(args).to_excel(xw, index=False, sheet_name="Definitions")
 
     print(f"[OK] Saved: {out_path.resolve()}")
     print(df_status.to_string(index=False))
