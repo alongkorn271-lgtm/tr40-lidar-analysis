@@ -29,6 +29,14 @@ import nrb_engine as ne
 
 C_LIGHT = 299_792_458.0
 
+# Where the profile starts: the measured overlap reaches 0.99 there, so below it the
+# telescope never sees the whole beam and the bins are not a measurement of the sky.
+try:
+    from overlap_function import DEFAULT_MIN_RANGE_M as MIN_RANGE_M
+except Exception:
+    MIN_RANGE_M = 345.0
+ADC_RAIL_MV = 440.0     # the 500 mV input range starts to clip here in practice
+
 # ---- Criteria -------------------------------------------------------------------
 # (id, group, name, unit, pass_rule, warn_rule, source)
 # pass/warn rules are applied by verdict(); the text is what the check sheet prints.
@@ -38,9 +46,16 @@ CRITERIA = {
                plan_frac=0.95, min_shots=1500),
     "A2": dict(name="Header matches plan (HV, bin, discriminator, range, altitude)", unit="-",
                pass_="all match, ∥ = ⊥", warn="-", fail="any differs"),
-    "B1": dict(name="Analog peak (background removed)", unit="mV",
+    # Judged from full overlap upward (overlap_function.DEFAULT_MIN_RANGE_M): below it
+    # the profile is dropped anyway, so a peak there says nothing about the data we keep.
+    "B1": dict(name="Analog peak above full overlap (background removed)", unit="mV",
                pass_="≤ 200 mV (≤ 40 % of range)", warn="200–250 mV", fail="> 250 mV (half of 500 mV range)",
                pass_max=200.0, warn_max=250.0),
+    # Clipping itself is still reported, as the height the ADC rail reaches: it has to
+    # stay below where the profile starts, or saturated bins survive into the products.
+    "B1c": dict(name="Top of ADC clipping (analog at the 500 mV rail)", unit="m",
+                pass_="< start of profile (full overlap)", warn="-",
+                fail="≥ start of profile", pass_max=None),
     "B2": dict(name="ADC overflow bins", unit="bins", pass_="0", warn="-", fail="≥ 1", pass_max=0),
     "B3": dict(name="PMT average current", unit="µA",
                pass_="≤ 80 µA", warn="80–100 µA", fail="> 100 µA", pass_max=80.0, warn_max=100.0),
@@ -189,8 +204,14 @@ def measure_file(path: Path) -> Optional[Dict]:
         bgP = float(np.mean(ne.dead_time_correct_mhz(a2[trim:pre - trim, cp], DEAD_TIME[ch])))
         out[f"{ch}_bg_analog_mv"] = bgA
         out[f"{ch}_bg_photon_mhz"] = bgN
-        out[f"{ch}_peak_mv"] = float(np.max(A - bgA))
-        out[f"{ch}_peak_r_m"] = float(r[int(np.argmax(A - bgA))])
+        Abg = A - bgA
+        keep = r >= MIN_RANGE_M
+        out[f"{ch}_peak_mv"] = float(np.max(Abg[keep])) if keep.any() else np.nan
+        out[f"{ch}_peak_r_m"] = float(r[keep][int(np.argmax(Abg[keep]))]) if keep.any() else np.nan
+        out[f"{ch}_peak_all_mv"] = float(np.max(Abg))          # including the near field
+        rail = Abg > ADC_RAIL_MV
+        out[f"{ch}_clip_bins"] = int(rail.sum())
+        out[f"{ch}_clip_top_m"] = float(r[rail].max()) if rail.any() else 0.0
         out[f"{ch}_overflow_bins"] = int(flag.sum())
 
         cb = ne.glue_cloud_base_m(r, A, bg_analog_mv=bgA, analog_noise_mv=sA)   # overloading cloud (glue)
@@ -289,6 +310,9 @@ def check_folder(folder: Path, *, plan: Optional[Dict] = None) -> pd.DataFrame:
         for ch in ("par", "perp"):
             k = "p" if ch == "par" else "s"
             v[f"B1{k}"] = verdict("B1", row[f"{ch}_peak_mv"])
+            ct = row.get(f"{ch}_clip_top_m", np.nan)
+            v[f"B1c{k}"] = ("NA" if not np.isfinite(ct)
+                            else "PASS" if ct < MIN_RANGE_M else "FAIL")
             v[f"B2{k}"] = "PASS" if row[f"{ch}_overflow_bins"] == 0 else "FAIL"
             v[f"B3{k}"] = verdict("B3", row[f"{ch}_pmt_uA"])
             v[f"C1{k}"] = verdict("C1", row[f"{ch}_bg_photon_mhz"])
@@ -330,10 +354,12 @@ NRB_MIN_TOP_M, NRB_FULL_TOP_M = 1000.0, 3000.0
 DELTA_MIN_TOP_M, DELTA_FULL_TOP_M = 1000.0, 2000.0
 
 # (verdict column, value, night only, reason) — reasons are what the operator reads
-NRB_LIMIT = [("B1p", "FAIL", False, "analog ∥ อิ่มตัว (near field)"),
+NRB_LIMIT = [("B1p", "FAIL", False, "analog ∥ อิ่มตัว เหนือจุด overlap เต็ม"),
+             ("B1cp", "FAIL", False, "การตันของ ADC ∥ สูงเกินจุดเริ่มโปรไฟล์"),
              ("B3p", "FAIL", False, "กระแส PMT ∥ > 100 µA"),
              ("D1p", "FAIL", True, "ไม่มีช่วง glue ∥ (ใช้ gain คงที่)")]
-DELTA_LIMIT = [("B1p", "FAIL", False, "analog ∥ อิ่มตัว → δ ใกล้พื้นเพี้ยน"),
+DELTA_LIMIT = [("B1p", "FAIL", False, "analog ∥ อิ่มตัว → δ เพี้ยน"),
+               ("B1cp", "FAIL", False, "การตันของ ADC ∥ สูงเกินจุดเริ่มโปรไฟล์"),
                ("B3s", "FAIL", False, "กระแส PMT ⊥ > 100 µA"),
                ("E2", "FAIL", True, "คาลิเบรตเองไม่ได้ (ใช้ C ของคืน)"),
                ("C2s", "FAIL", True, "background ⊥ กลางคืนสูง"),
@@ -473,6 +499,7 @@ def day_decision(D: pd.DataFrame) -> Dict[str, object]:
 # but not scored (B2: bit meaning unconfirmed; G1: weather, not a fault).
 SCORED = [("A1", "A1", "A1"), ("A2", "A2", "A2"),
           ("B1 ∥", "B1", "B1p"), ("B1 ⊥", "B1", "B1s"),
+          ("B1c ∥", "B1c", "B1cp"), ("B1c ⊥", "B1c", "B1cs"),
           ("B3 ∥", "B3", "B3p"), ("B3 ⊥", "B3", "B3s"),
           ("C1 ∥", "C1", "C1p"), ("C1 ⊥", "C1", "C1s"),
           ("C2 ∥", "C2", "C2p"), ("C2 ⊥", "C2", "C2s"),

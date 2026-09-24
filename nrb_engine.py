@@ -12,6 +12,17 @@ import pandas as pd
 # Core helpers
 # -----------------------------------------------------------------------------
 
+try:                                   # the measured overlap function O(r)
+    from overlap_function import DEFAULT_MIN_RANGE_M as _FULL_OVERLAP_M
+except Exception:                       # keep the engine importable on its own
+    _FULL_OVERLAP_M = 345.0
+
+#: Below full overlap the telescope sees only part of the beam, so the profile
+#: there is not a measurement of the atmosphere. Every product starts here.
+#: Measured 2026-09-24 from 81 night profiles - see overlap_function.py.
+DEFAULT_MIN_RANGE_M = float(_FULL_OVERLAP_M)
+
+
 def cosine_taper_weight(r: np.ndarray, r1: float, r2: float) -> np.ndarray:
     r = np.asarray(r, float)
     w = np.zeros_like(r, dtype=float)
@@ -907,6 +918,7 @@ def compute_nrb_reference_glue(
     blend_cluster_min_m: Optional[float] = None,
     gluing_mode: str = "auto",
     day_glue_min_r2: float = 0.85,
+    min_range_m: float = 0.0,
     overlap_O_R: Optional[np.ndarray] = None,
     overlap_O_min: float = 0.1,
     afterpulse_A_R: Optional[np.ndarray] = None,
@@ -1196,6 +1208,15 @@ def compute_nrb_reference_glue(
         raise ValueError("energy_mj must be > 0")
     nrb_final = nrb_1st / energy_j
 
+    # ── below full overlap the profile is not a measurement of the atmosphere ──
+    # Drop it before normalising, otherwise the normalising maximum can itself
+    # come from a bin the telescope never fully saw.
+    below_overlap = np.zeros_like(r, dtype=bool)
+    if np.isfinite(min_range_m) and float(min_range_m) > 0:
+        below_overlap = r < float(min_range_m)
+        nrb_final = np.where(below_overlap, np.nan, nrb_final)
+        nrb_1st = np.where(below_overlap, np.nan, nrb_1st)
+
     max_nrb = float(np.nanmax(nrb_final)) if np.any(np.isfinite(nrb_final)) else np.nan
     if np.isfinite(max_nrb) and max_nrb > 0:
         nrb_norm = nrb_final / max_nrb
@@ -1230,6 +1251,8 @@ def compute_nrb_reference_glue(
         "cross_min_toggle_m": float(auto_out.get("cross_min_toggle_m", np.nan)),
         "cross_max_toggle_idx": float(auto_out.get("cross_max_toggle_idx", np.nan)),
         "cross_min_toggle_idx": float(auto_out.get("cross_min_toggle_idx", np.nan)),
+        "min_range_m": float(min_range_m),
+        "bins_below_full_overlap": float(np.count_nonzero(below_overlap)),
         "overlap_applied": 1.0 if overlap_applied else 0.0,
         "overlap_o_min": float(overlap_O_min) if overlap_applied else np.nan,
         "overlap_first_trust_range_m": float(overlap_first_trust_m) if overlap_applied else np.nan,
@@ -1261,6 +1284,7 @@ def compute_nrb_reference_glue(
         "nrb_1st": nrb_1st,
         "nrb_final": nrb_final,
         "nrb_norm": nrb_norm,
+        "below_full_overlap": below_overlap,
     }
     if guard_failed:
         glue_mode_text = "day_glue_guard_failed_photon_only"
@@ -1324,6 +1348,7 @@ def build_single_profile(
     blend_norm_rmse_max: float = 0.12,
     blend_cluster_min_m: Optional[float] = None,
     gluing_mode: str = "auto",
+    min_range_m: float = DEFAULT_MIN_RANGE_M,
     overlap_O_R: Optional[np.ndarray] = None,
     overlap_O_min: float = 0.1,
     afterpulse_A_R: Optional[np.ndarray] = None,
@@ -1474,6 +1499,7 @@ def build_single_profile(
         blend_norm_rmse_max=blend_norm_rmse_max,
         blend_cluster_min_m=blend_cluster_min_m,
         gluing_mode=gluing_mode,
+        min_range_m=min_range_m,
         overlap_O_R=overlap_O_R,
         overlap_O_min=overlap_O_min,
         afterpulse_A_R=afterpulse_A_R,
@@ -1500,6 +1526,7 @@ def build_single_profile(
     out["overlap_O_R"] = inter["overlap_O_R"]
     out["nrb_final"] = inter["nrb_final"]
     out["nrb"] = inter["nrb_norm"]
+    out["below_full_overlap"] = inter["below_full_overlap"]
 
     # ── Signal-to-noise ratio (photon channel) ──────────────────────────────
     # SNR = (dead-time-corrected photon − BG) / dead-time-corrected stderr.
@@ -1521,6 +1548,8 @@ def build_single_profile(
             (photon_stderr_dt > 0) & np.isfinite(photon_stderr_dt),
             sig_bgsub / photon_stderr_dt, np.nan,
         )
+    if np.any(inter["below_full_overlap"]):
+        snr = np.where(inter["below_full_overlap"], np.nan, snr)
     out["photon_stderr_MHz"] = photon_stderr           # raw σ_µ from the file (unchanged)
     out["photon_stderr_dt_MHz"] = photon_stderr_dt      # dead-time-propagated σ_µ
     out["snr"] = snr
@@ -1601,6 +1630,8 @@ def build_single_profile(
         "cross_min_toggle_m": float(qc["cross_min_toggle_m"]),
         "cross_max_toggle_idx": float(qc["cross_max_toggle_idx"]),
         "cross_min_toggle_idx": float(qc["cross_min_toggle_idx"]),
+        "min_range_m": float(qc.get("min_range_m", 0.0)),
+        "bins_below_full_overlap": float(qc.get("bins_below_full_overlap", 0.0)),
         "overlap_applied": float(qc["overlap_applied"]),
         "overlap_o_min": float(qc["overlap_o_min"]),
         "overlap_first_trust_range_m": float(qc["overlap_first_trust_range_m"]),
@@ -1873,6 +1904,7 @@ def build_daily_profile_from_folder(
     blend_norm_rmse_max: float = 0.12,
     blend_cluster_min_m: Optional[float] = None,
     gluing_mode: str = "auto",
+    min_range_m: float = DEFAULT_MIN_RANGE_M,
     overlap_O_R: Optional[np.ndarray] = None,
     overlap_O_min: float = 0.1,
     afterpulse_A_R: Optional[np.ndarray] = None,
@@ -1946,6 +1978,7 @@ def build_daily_profile_from_folder(
                 blend_norm_rmse_max=blend_norm_rmse_max,
                 blend_cluster_min_m=blend_cluster_min_m,
                 gluing_mode=gluing_mode,
+                min_range_m=min_range_m,
                 overlap_O_R=overlap_O_R,
                 overlap_O_min=overlap_O_min,
                 afterpulse_A_R=afterpulse_A_R,
@@ -2047,6 +2080,7 @@ def build_daily_profile_from_folder(
             "gluing_mode": str(gluing_mode),
             "energy_mj": float(energy_mj),
             "strict": bool(strict),
+            "min_range_m": float(min_range_m),
             "overlap_correction": "applied" if overlap_O_R is not None else "not_applied",
             "overlap_o_min": float(overlap_O_min) if overlap_O_R is not None else float("nan"),
             "afterpulse_correction": "applied" if afterpulse_A_R is not None else "not_applied",

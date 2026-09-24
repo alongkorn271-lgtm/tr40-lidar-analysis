@@ -579,6 +579,14 @@ def build_depol_for_pair(
     # affects the reported/plotted delta — not the calibration itself.
     delta_v = np.asarray(res["delta_v"], float).copy()
     trust = np.isfinite(snr_cr) & (snr_cr >= float(snr_min))
+    # Below full overlap delta is invalid for a second reason: the two channels
+    # do not reach full overlap at the same height (measured: ∥ 345 m, ⊥ 120 m),
+    # so the overlap does NOT cancel in the cross/co ratio the way R^2 and the
+    # pulse energy do. build_single_profile has already blanked the NRB there;
+    # blank delta on the same rule.
+    _min_r = float(co_meta.get("min_range_m", 0.0) or 0.0)
+    if np.isfinite(_min_r) and _min_r > 0:
+        trust = trust & (r >= _min_r)
     delta_v[~trust] = np.nan
     n_trust = int(np.sum(trust & np.isfinite(res["delta_v"])))
 

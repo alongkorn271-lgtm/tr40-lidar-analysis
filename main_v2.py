@@ -76,10 +76,12 @@ try:
         collect_actual_timestamps as nrb_collect_actual_timestamps,
         detect_acquisition_layout as nrb_detect_acquisition_layout,
         set_poisson_stderr_mode as _nrb_set_poisson_stderr_mode,
+        DEFAULT_MIN_RANGE_M as NRB_MIN_RANGE_M,
     )
     _HAS_NRB = True
 except ImportError:
     _HAS_NRB = False
+    NRB_MIN_RANGE_M = 345.0
 
     def _nrb_set_poisson_stderr_mode(mode: str) -> None:  # no-op fallback
         pass
@@ -1156,6 +1158,11 @@ class Step2Page(ctk.CTkFrame):
         self.overlap_mode = tk.StringVar(value="Analytical (from hardware)")
         self.overlap_file = tk.StringVar(value="")
         self.overlap_o_min = tk.DoubleVar(value=0.99)
+        # Where the profile starts. Below full overlap the telescope sees only
+        # part of the beam, so those bins are not a measurement of the sky.
+        # 345 m is where the measured O(R) reaches 0.99 on the parallel channel
+        # (overlap_function.py, 81 night profiles, 2026-09-24).
+        self.min_range_m = tk.DoubleVar(value=NRB_MIN_RANGE_M)
         # Afterpulse correction
         self.afterpulse_mode = tk.StringVar(value="Disabled")
         self.afterpulse_file = tk.StringVar(value="")
@@ -1602,11 +1609,21 @@ class Step2Page(ctk.CTkFrame):
         self._subsection_label(body, "Signal window & energy").grid(row=23, column=0, sticky="ew")
         row7 = ctk.CTkFrame(body, fg_color="transparent")
         row7.grid(row=24, column=0, sticky="ew", pady=(0, 0))
-        for i in range(3):
+        for i in range(4):
             row7.grid_columnconfigure(i, weight=1)
         FieldRow(row7, "sig_start_m", self.sig_start_m).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         FieldRow(row7, "sig_end_m", self.sig_end_m).grid(row=0, column=1, sticky="ew", padx=3)
-        FieldRow(row7, "energy_mj", self.energy_mj).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        FieldRow(row7, "energy_mj", self.energy_mj).grid(row=0, column=2, sticky="ew", padx=3)
+        FieldRow(row7, "start at (m)", self.min_range_m).grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        ctk.CTkLabel(
+            body,
+            text=f"start at = where the measured overlap reaches 0.99 "
+                 f"(∥ {NRB_MIN_RANGE_M:.0f} m, ⊥ 120 m — see overlap_function.py). Bins below it "
+                 f"are dropped before normalising, so the ÷max cannot come from a height the "
+                 f"telescope never fully saw. Set 0 to keep the whole profile.",
+            font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
+            wraplength=520, justify="left",
+        ).grid(row=24, column=1, sticky="w", padx=(8, 0))
 
         # Subsection: Signal quality (SNR gating)
         self._subsection_label(body, "Signal quality (SNR)").grid(row=25, column=0, sticky="ew")
@@ -2123,6 +2140,7 @@ class Step2Page(ctk.CTkFrame):
             energy_mj=float(self.energy_mj.get()),
             auto_blend=bool(self.auto_blend.get()),
             gluing_mode=self._gluing_mode_str(),
+            min_range_m=float(self.min_range_m.get()),
             overlap_O_R=overlap_O_R,
             overlap_O_min=float(self.overlap_o_min.get()),
             afterpulse_A_R=afterpulse_A_R,
@@ -2364,6 +2382,7 @@ class Step2Page(ctk.CTkFrame):
                     energy_mj=float(self.energy_mj.get()),
                     auto_blend=bool(self.auto_blend.get()),
                     gluing_mode=self._gluing_mode_str(),
+                    min_range_m=float(self.min_range_m.get()),
                     overlap_O_R=overlap_O_R,
                     overlap_O_min=float(self.overlap_o_min.get()),
                     afterpulse_A_R=afterpulse_A_R,
@@ -6954,6 +6973,11 @@ class Step6Page(ctk.CTkFrame):
         # (R≳150 m) is kept; below that O(R)<0.99 → NaN.
         self.overlap_mode = tk.StringVar(value="Analytical (NARIT)")
         self.overlap_o_min = tk.DoubleVar(value=0.99)
+        # Where the profile starts. Below full overlap the telescope sees only
+        # part of the beam, so those bins are not a measurement of the sky.
+        # 345 m is where the measured O(R) reaches 0.99 on the parallel channel
+        # (overlap_function.py, 81 night profiles, 2026-09-24).
+        self.min_range_m = tk.DoubleVar(value=NRB_MIN_RANGE_M)
         self.overlap_file = tk.StringVar(value="")
         self.afterpulse_co_file = tk.StringVar(value="")
         self.afterpulse_cross_file = tk.StringVar(value="")
@@ -7350,6 +7374,7 @@ class Step6Page(ctk.CTkFrame):
         menu(ov, self.overlap_mode, ["Disabled", "Analytical (NARIT)", "Load file"],
              command=lambda _v: self._update_corr_ui(), row=1, column=0, sticky="ew", pady=(2, 0))
         FieldRow(f, "O_min", self.overlap_o_min).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        FieldRow(f, "start at (m)", self.min_range_m).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(4, 0))
 
         self._ov_file_row = ctk.CTkFrame(body, fg_color="transparent")
         self._ov_file_row.grid(row=r, column=0, sticky="ew", pady=(0, 4))
@@ -7895,6 +7920,7 @@ class Step6Page(ctk.CTkFrame):
                 "auto_blend": bool(self.auto_blend.get()),
                 "sig_start_m": float(self.sig_start_m.get()),
                 "sig_end_m": float(self.sig_end_m.get()),
+                "min_range_m": float(self.min_range_m.get()),
                 "glue_fit": "robust" if bool(self.robust_glue.get()) else "ols",
             }
         except Exception as e:
@@ -8029,6 +8055,7 @@ class Step6Page(ctk.CTkFrame):
                     blend_r1_m=raw_p["blend_r1_m"], blend_r2_m=raw_p["blend_r2_m"],
                     auto_blend=raw_p["auto_blend"],
                     sig_start_m=raw_p["sig_start_m"], sig_end_m=raw_p["sig_end_m"],
+                    min_range_m=raw_p["min_range_m"],
                     glue_fit=raw_p["glue_fit"],
                     strict=False, logger=self._safe_log, progress_cb=progress_cb,
                 )
@@ -8761,7 +8788,7 @@ class Step7Page(ctk.CTkFrame):
         ctk.CTkLabel(
             body,
             text="Raw QC verdict columns, comma separated (p = parallel, s = perpendicular): A1 A2 "
-                 "B1p B1s B3p B3s C1p C1s C2p C2s D1p D1s D2p D2s E1 E2 F1 G1, or NRB / DELTA = the profiles Raw QC judged unusable "
+                 "B1p B1s B1cp B1cs B3p B3s C1p C1s C2p C2s D1p D1s D2p D2s E1 E2 F1 G1, or NRB / DELTA = the profiles Raw QC judged unusable "
                  "for that product - e.g. 'DELTA' or 'E2, C2p'. "
                  "A profile is dropped when any listed item is FAIL. Needs a Step 3 workbook made "
                  "with 'Attach Raw QC verdicts'. Blank = keep all.",
@@ -9545,6 +9572,7 @@ class RawQCPage(ctk.CTkFrame):
     MATRIX_COLS = {
         "A1": ("Shots", "shots", ""), "A2": ("Header\n= plan", "A2_note", ""),
         "B1p": ("Analog\npeak par", "par_peak_mv", "mV"), "B1s": ("Analog\npeak perp", "perp_peak_mv", "mV"),
+        "B1cp": ("Clip top\npar", "par_clip_top_m", "m"), "B1cs": ("Clip top\nperp", "perp_clip_top_m", "m"),
         "B3p": ("PMT\ncurrent par", "par_pmt_uA", "µA"), "B3s": ("PMT\ncurrent perp", "perp_pmt_uA", "µA"),
         "C1p": ("Sky bg\npar", "par_bg_photon_mhz", "MHz"), "C1s": ("Sky bg\nperp", "perp_bg_photon_mhz", "MHz"),
         "C2p": ("Night bg\npar", "par_bg_photon_mhz", "MHz"), "C2s": ("Night bg\nperp", "perp_bg_photon_mhz", "MHz"),

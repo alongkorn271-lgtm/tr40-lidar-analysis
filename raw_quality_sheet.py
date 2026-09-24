@@ -29,6 +29,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.workbook.defined_name import DefinedName
 
 import raw_quality_check as rq
+from raw_quality_check import MIN_RANGE_M
 
 FONT = "Leelawadee UI"   # Thai + ∥/⊥ glyphs (Tahoma drops the symbols)
 THIN = Side(style="thin", color="808080")
@@ -64,12 +65,18 @@ CRITERIA_ROWS = [
      "gain ของ PMT เปลี่ยนแรงมากตาม HV ส่วน glue gain (87/96), dead time (4.7/5.0 ns) และค่าคาลิเบรต C วัดไว้ที่ HV 750 V, disc 8, bin นี้ ถ้าเปลี่ยนค่าเหล่านี้ ค่าคงที่ทั้งหมดต้องวัดใหม่",
      "Licel PM-HV manual §5.6 (dead time ขึ้นกับ HV/disc)",
      "ค่าคงที่ของเครื่องใช้ไม่ได้ ผล δ และ NRB เพี้ยนแบบไม่รู้ตัว", "ล็อก preset ACQ ต่อ case, ตรวจ header ทุกวัน"),
-    ("B1", "B · Analog", "Analog peak (หัก background)", "ทุกไฟล์, แยก ∥/⊥",
-     "ค่าสูงสุดของ analog − ค่าเฉลี่ย pretrigger",
+    ("B1", "B · Analog", "Analog peak เหนือจุด overlap เต็ม (หัก background)", "ทุกไฟล์, แยก ∥/⊥",
+     "ค่าสูงสุดของ analog − ค่าเฉลี่ย pretrigger นับเฉพาะระยะตั้งแต่ 345 m ขึ้นไป (จุดที่ overlap ถึง 0.99)",
      "≤ 200 mV", "200–250 mV", "> 250 mV (ครึ่งหนึ่งของ range 500 mV)", 200, 250,
-     "ภาคขยาย analog ต้องทำงานเชิงเส้น คู่มือ PM-HV ให้ peak ไม่เกินครึ่ง input range และค่าราว 494 mV คือเพดาน ADC (ตัด) ส่วนที่ตัดคือ near-field ซึ่ง glue และ PBL ต้องใช้",
-     "Licel PM-HV manual §5.2; docs/analog_range_and_hv.md",
-     "near-field ∥ ถูกตัด, glue window หาย, δ ใกล้พื้นผิด", "ลด HV ของ ∥ หรือใส่ ND filter เฉพาะ ∥ (ไม่ลดพลังงานเลเซอร์ เพราะ ⊥ อ่อนอยู่แล้ว)"),
+     "ภาคขยาย analog ต้องทำงานเชิงเส้น คู่มือ PM-HV ให้ peak ไม่เกินครึ่ง input range ใต้จุด overlap เต็มเราตัดข้อมูลทิ้งอยู่แล้ว ค่า peak ตรงนั้นจึงไม่บอกอะไรกับข้อมูลที่ใช้จริง",
+     "Licel PM-HV manual §5.2; overlap_function.py; docs/analog_range_and_hv.md",
+     "สัญญาณ ∥ ในช่วงที่ใช้งานไม่เป็นเชิงเส้น, glue gain เพี้ยน", "ใส่ ND filter เฉพาะ ∥ (ลด HV ไม่ได้ผล เพราะ photon counting พังก่อน)"),
+    ("B1c", "B · Analog", "ความสูงสูงสุดที่ analog ชนเพดาน ADC", "ทุกไฟล์, แยก ∥/⊥",
+     "ระยะสูงสุดที่ analog − background > 440 mV (เพดานจริงของ input range 500 mV)",
+     "< จุดเริ่มโปรไฟล์ (overlap เต็ม)", "–", "≥ จุดเริ่มโปรไฟล์", None, None,
+     "ถ้าการตันขึ้นไปสูงกว่าจุดที่โปรไฟล์เริ่ม แปลว่ามี bin ที่อิ่มตัวหลุดเข้าไปในผลลัพธ์ วัดจริงได้ ∥ ตันถึง 105–146 m ซึ่งต่ำกว่า 345 m",
+     "Licel PM-HV manual §5.2; overlap_function.py",
+     "bin ที่อิ่มตัวปนเข้าไปใน NRB/δ", "ใส่ ND filter ∥ หรือยกจุดเริ่มโปรไฟล์ขึ้น"),
     ("B2", "B · Analog", "ADC overflow bins (ข้อมูลประกอบ ไม่นับคะแนน)", "ทุกไฟล์, แยก ∥/⊥",
      "นับ bin ที่ Licel ตั้ง overflow flag (dataset OF0)",
      "0 bin", "–", "≥ 1 bin", 0, None,
@@ -280,6 +287,11 @@ def _case_columns() -> List[Dict]:
         return (f'=IF(OR({{use}}="N",{{{val}}}=""{cond}),"NA",IF({{{val}}}<={_name(cid,"PASS")},"PASS",'
                 f'IF({{{val}}}<={_name(cid,"WARN")},"WARN","FAIL")))')
 
+    def clip_rule(val):
+        """The ADC rail has to stay below where the profile starts (full overlap)."""
+        return (f'=IF(OR({{use}}="N",{{{val}}}=""),"NA",'
+                f'IF({{{val}}}<{MIN_RANGE_M:g},"PASS","FAIL"))')
+
     def minrule(cid, val, night=False):
         cond = f',{{dn}}<>"Night"' if night else ""
         return (f'=IF(OR({{use}}="N",{{{val}}}=""{cond}),"NA",IF({{{val}}}>={_name(cid,"PASS")},"PASS",'
@@ -296,12 +308,16 @@ def _case_columns() -> List[Dict]:
         v("A2n", "A · การเก็บข้อมูล", "A2 หมายเหตุ", "A2_note", fmt="@", w=12),
         v("pk_p", "B · Analog ∥", "Peak mV", "par_peak_mv", fill=P),
         f("B1p", "B · Analog ∥", "B1", maxrule("B1", "pk_p"), fill=P),
+        v("ct_p", "B · Analog ∥", "ตันถึง m", "par_clip_top_m", fmt="0", fill=P, w=8),
+        f("B1cp", "B · Analog ∥", "B1c", clip_rule("ct_p"), fill=P),
         v("of_p", "B · Analog ∥", "Overflow bin", "par_overflow_bins", fmt="0", fill=P, w=7),
         f("B2p", "B · Analog ∥", "B2", f'=IF(OR({{use}}="N",{{of_p}}=""),"NA",IF({{of_p}}<={_name("B2","PASS")},"PASS","FAIL"))', fill=P),
         v("ua_p", "B · Analog ∥", "PMT µA", "par_pmt_uA", fmt="0", fill=P, w=7),
         f("B3p", "B · Analog ∥", "B3", maxrule("B3", "ua_p"), fill=P),
         v("pk_s", "B · Analog ⊥", "Peak mV", "perp_peak_mv", fill=S),
         f("B1s", "B · Analog ⊥", "B1", maxrule("B1", "pk_s"), fill=S),
+        v("ct_s", "B · Analog ⊥", "ตันถึง m", "perp_clip_top_m", fmt="0", fill=S, w=8),
+        f("B1cs", "B · Analog ⊥", "B1c", clip_rule("ct_s"), fill=S),
         v("of_s", "B · Analog ⊥", "Overflow bin", "perp_overflow_bins", fmt="0", fill=S, w=7),
         f("B2s", "B · Analog ⊥", "B2", f'=IF(OR({{use}}="N",{{of_s}}=""),"NA",IF({{of_s}}<={_name("B2","PASS")},"PASS","FAIL"))', fill=S),
         v("ua_s", "B · Analog ⊥", "PMT µA", "perp_pmt_uA", fmt="0", fill=S, w=7),
