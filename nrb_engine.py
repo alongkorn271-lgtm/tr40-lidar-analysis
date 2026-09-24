@@ -15,11 +15,13 @@ import pandas as pd
 try:                                   # the measured overlap function O(r)
     from overlap_function import DEFAULT_MIN_RANGE_M as _FULL_OVERLAP_M
 except Exception:                       # keep the engine importable on its own
-    _FULL_OVERLAP_M = 345.0
+    _FULL_OVERLAP_M = 150.0
 
 #: Below full overlap the telescope sees only part of the beam, so the profile
 #: there is not a measurement of the atmosphere. Every product starts here.
-#: Measured 2026-09-24 from 81 night profiles - see overlap_function.py.
+#: 150 m is where the geometric overlap reaches 0.99 for the NARIT TR40
+#: (f 2032 mm, 8 mm field stop, 1.5 mrad beam, axes 156 mm apart), confirmed
+#: against the Mini-MPL - see overlap_function.py.
 DEFAULT_MIN_RANGE_M = float(_FULL_OVERLAP_M)
 
 

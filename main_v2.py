@@ -81,7 +81,7 @@ try:
     _HAS_NRB = True
 except ImportError:
     _HAS_NRB = False
-    NRB_MIN_RANGE_M = 345.0
+    NRB_MIN_RANGE_M = 150.0
 
     def _nrb_set_poisson_stderr_mode(mode: str) -> None:  # no-op fallback
         pass
@@ -1160,8 +1160,9 @@ class Step2Page(ctk.CTkFrame):
         self.overlap_o_min = tk.DoubleVar(value=0.99)
         # Where the profile starts. Below full overlap the telescope sees only
         # part of the beam, so those bins are not a measurement of the sky.
-        # 345 m is where the measured O(R) reaches 0.99 on the parallel channel
-        # (overlap_function.py, 81 night profiles, 2026-09-24).
+        # 150 m is where the geometric O(R) reaches 0.99 for this telescope/laser
+        # (overlap.py hardware + Kumar & Rocadenbosch 2013), confirmed against the
+        # Mini-MPL. See overlap_function.py.
         self.min_range_m = tk.DoubleVar(value=NRB_MIN_RANGE_M)
         # Afterpulse correction
         self.afterpulse_mode = tk.StringVar(value="Disabled")
@@ -1617,8 +1618,9 @@ class Step2Page(ctk.CTkFrame):
         FieldRow(row7, "start at (m)", self.min_range_m).grid(row=0, column=3, sticky="ew", padx=(6, 0))
         ctk.CTkLabel(
             body,
-            text=f"start at = where the measured overlap reaches 0.99 "
-                 f"(∥ {NRB_MIN_RANGE_M:.0f} m, ⊥ 120 m — see overlap_function.py). Bins below it "
+            text=f"start at = where the overlap reaches 0.99 for this geometry "
+                 f"({NRB_MIN_RANGE_M:.0f} m: f 2032 mm, 8 mm field stop, 1.5 mrad beam, axes "
+                 f"156 mm apart — see overlap_function.py). Bins below it "
                  f"are dropped before normalising, so the ÷max cannot come from a height the "
                  f"telescope never fully saw. Set 0 to keep the whole profile.",
             font=theme.F_TINY, text_color=theme.TEXT_MUTED, anchor="w",
@@ -6975,8 +6977,9 @@ class Step6Page(ctk.CTkFrame):
         self.overlap_o_min = tk.DoubleVar(value=0.99)
         # Where the profile starts. Below full overlap the telescope sees only
         # part of the beam, so those bins are not a measurement of the sky.
-        # 345 m is where the measured O(R) reaches 0.99 on the parallel channel
-        # (overlap_function.py, 81 night profiles, 2026-09-24).
+        # 150 m is where the geometric O(R) reaches 0.99 for this telescope/laser
+        # (overlap.py hardware + Kumar & Rocadenbosch 2013), confirmed against the
+        # Mini-MPL. See overlap_function.py.
         self.min_range_m = tk.DoubleVar(value=NRB_MIN_RANGE_M)
         self.overlap_file = tk.StringVar(value="")
         self.afterpulse_co_file = tk.StringVar(value="")

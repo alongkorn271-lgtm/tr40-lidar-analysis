@@ -34,7 +34,7 @@ C_LIGHT = 299_792_458.0
 try:
     from overlap_function import DEFAULT_MIN_RANGE_M as MIN_RANGE_M
 except Exception:
-    MIN_RANGE_M = 345.0
+    MIN_RANGE_M = 150.0
 ADC_RAIL_MV = 440.0     # the 500 mV input range starts to clip here in practice
 
 # ---- Criteria -------------------------------------------------------------------

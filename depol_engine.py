@@ -580,7 +580,8 @@ def build_depol_for_pair(
     delta_v = np.asarray(res["delta_v"], float).copy()
     trust = np.isfinite(snr_cr) & (snr_cr >= float(snr_min))
     # Below full overlap delta is invalid for a second reason: the two channels
-    # do not reach full overlap at the same height (measured: ∥ 345 m, ⊥ 120 m),
+    # behave the same below full overlap (the parallel chain reads low well
+    # past it - see overlap_function.py),
     # so the overlap does NOT cancel in the cross/co ratio the way R^2 and the
     # pulse energy do. build_single_profile has already blanked the NRB there;
     # blank delta on the same rule.
